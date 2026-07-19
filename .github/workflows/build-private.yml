@@ -47,7 +47,7 @@ jobs:
           if [ -f "$HOME/.shorebird/bin/shorebird" ]; then
             echo "Shorebird cached, skipping install"
           else
-            curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/shorebirdtech/install/main/install.sh | sh
+            curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/shorebirdtech/install/main/install.sh | bash
           fi
           echo "$HOME/.shorebird/bin" >> $GITHUB_PATH
       - name: secrets
@@ -201,7 +201,7 @@ jobs:
           if [ -f "$HOME/.shorebird/bin/shorebird" ]; then
             echo "Shorebird cached, skipping install"
           else
-            curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/shorebirdtech/install/main/install.sh | sh
+            curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/shorebirdtech/install/main/install.sh | bash
           fi
           echo "$HOME/.shorebird/bin" >> $GITHUB_PATH
       - name: secrets
@@ -258,7 +258,7 @@ jobs:
           if [ -f "$HOME/.shorebird/bin/shorebird" ]; then
             echo "Shorebird cached, skipping install"
           else
-            curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/shorebirdtech/install/main/install.sh | sh
+            curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/shorebirdtech/install/main/install.sh | bash
           fi
           echo "$HOME/.shorebird/bin" >> $GITHUB_PATH
       - name: secrets

@@ -63,7 +63,7 @@ jobs:
           foreach($k in $m.Keys){if($m[$k]){"$k=$($m[$k])"|Out-File $env:GITHUB_ENV -Append -Encoding utf8}}
       - name: build
         run: |
-          $a=@{Version='${{ github.event.client_payload.daymica_version }}';BuildNumber=[int]'${{ github.event.client_payload.daymica_build }}'}
+          $a=@{Version='${{ github.event.client_payload.daymica_version }}';BuildNumber=${{ github.event.client_payload.daymica_build }}}
           if('${{ github.event.client_payload.mode }}'-eq'patch'){$a['Patch']=$true}
           & ./scripts/build-daymica-android-prod.ps1 @a
           if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
@@ -106,7 +106,7 @@ jobs:
           foreach($k in $m.Keys){if($m[$k]){"$k=$($m[$k])"|Out-File $env:GITHUB_ENV -Append -Encoding utf8}}
       - name: build
         run: |
-          & ./scripts/build-flutter-windows-prod.ps1 -AppSlug daymica -Version '${{ github.event.client_payload.daymica_version }}' -BuildNumber [int]'${{ github.event.client_payload.daymica_build }}'
+          & ./scripts/build-flutter-windows-prod.ps1 -AppSlug daymica -Version '${{ github.event.client_payload.daymica_version }}' -BuildNumber ${{ github.event.client_payload.daymica_build }}
           if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
 
   daymica-web:
@@ -215,7 +215,7 @@ jobs:
           foreach($k in $m.Keys){if($m[$k]){"$k=$($m[$k])"|Out-File $env:GITHUB_ENV -Append -Encoding utf8}}
       - name: build
         run: |
-          $a=@{Version='${{ github.event.client_payload.yaoxiaobai_version }}';BuildNumber=[int]'${{ github.event.client_payload.yaoxiaobai_build }}'}
+          $a=@{Version='${{ github.event.client_payload.yaoxiaobai_version }}';BuildNumber=${{ github.event.client_payload.yaoxiaobai_build }}}
           if('${{ github.event.client_payload.mode }}'-eq'patch'){$a['Patch']=$true}
           & ./scripts/build-yaoxiaobai-android-prod.ps1 @a
           if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
@@ -272,7 +272,7 @@ jobs:
           foreach($k in $m.Keys){if($m[$k]){"$k=$($m[$k])"|Out-File $env:GITHUB_ENV -Append -Encoding utf8}}
       - name: build
         run: |
-          $a=@{Version='${{ github.event.client_payload.footprint_version }}';BuildNumber=[int]'${{ github.event.client_payload.footprint_build }}'}
+          $a=@{Version='${{ github.event.client_payload.footprint_version }}';BuildNumber=${{ github.event.client_payload.footprint_build }}}
           if('${{ github.event.client_payload.mode }}'-eq'patch'){$a['Patch']=$true}
           & ./scripts/build-footprint-android-prod.ps1 @a
           if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}

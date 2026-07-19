@@ -1,0 +1,278 @@
+name: Public Builder for Private Repo
+
+on:
+  repository_dispatch:
+    types: [trigger-build]
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  daymica-android:
+    name: daymica-android
+    if: ${{ github.event.client_payload.do_daymica_android == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ github.event.client_payload.ref }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.6'
+          channel: 'stable'
+          cache: true
+      - name: Cache Gradle + pub + Shorebird
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.pub-cache
+            ~/.shorebird
+          key: ${{ runner.os }}-android-daymica-${{ hashFiles('apps/daymica/pubspec.lock', 'apps/daymica/android/build.gradle') }}
+          restore-keys: |
+            ${{ runner.os }}-android-daymica-
+            ${{ runner.os }}-android-
+      - name: Install Shorebird
+        shell: bash
+        run: |
+          if [ -f "$HOME/.shorebird/bin/shorebird" ]; then
+            echo "Shorebird cached, skipping install"
+          else
+            curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/shorebirdtech/install/main/install.sh | sh
+          fi
+          echo "$HOME/.shorebird/bin" >> $GITHUB_PATH
+      - name: secrets
+        run: |
+          $m=@{
+            SHOREBIRD_TOKEN='${{ secrets.SHOREBIRD_TOKEN }}';
+            DAYMICA_RELEASE_TOKEN='${{ secrets.DAYMICA_RELEASE_TOKEN }}';
+            RUSTFS_ACCESS_KEY='${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}';
+            RUSTFS_SECRET_KEY='${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}';
+            DAYMICA_RUSTFS_ACCESS_KEY='${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}';
+            DAYMICA_RUSTFS_SECRET_KEY='${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}'
+          }
+          foreach($k in $m.Keys){if($m[$k]){"$k=$($m[$k])"|Out-File $env:GITHUB_ENV -Append -Encoding utf8}}
+      - name: build
+        run: |
+          $a=@{Version='${{ github.event.client_payload.daymica_version }}';BuildNumber=[int]'${{ github.event.client_payload.daymica_build }}'}
+          if('${{ github.event.client_payload.mode }}'-eq'patch'){$a['Patch']=$true}
+          & ./scripts/build-daymica-android-prod.ps1 @a
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+
+  daymica-windows:
+    name: daymica-windows
+    if: ${{ github.event.client_payload.do_daymica_windows == 'true' }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ github.event.client_payload.ref }}
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.6'
+          channel: 'stable'
+          cache: true
+      - name: Cache pub + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pub-cache
+            apps/daymica/build
+          key: ${{ runner.os }}-windows-daymica-${{ hashFiles('apps/daymica/pubspec.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-windows-daymica-
+            ${{ runner.os }}-windows-
+      - name: secrets
+        run: |
+          $m=@{
+            DAYMICA_RELEASE_TOKEN='${{ secrets.DAYMICA_RELEASE_TOKEN }}';
+            RUSTFS_ACCESS_KEY='${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}';
+            RUSTFS_SECRET_KEY='${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}';
+            DAYMICA_RUSTFS_ACCESS_KEY='${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}';
+            DAYMICA_RUSTFS_SECRET_KEY='${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}'
+          }
+          foreach($k in $m.Keys){if($m[$k]){"$k=$($m[$k])"|Out-File $env:GITHUB_ENV -Append -Encoding utf8}}
+      - name: build
+        run: |
+          & ./scripts/build-flutter-windows-prod.ps1 -AppSlug daymica -Version '${{ github.event.client_payload.daymica_version }}' -BuildNumber [int]'${{ github.event.client_payload.daymica_build }}'
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+
+  daymica-web:
+    name: daymica-web
+    if: ${{ github.event.client_payload.do_daymica_web == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ github.event.client_payload.ref }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: secrets
+        run: |
+          $m=@{
+            CCR_USERNAME='${{ secrets.CCR_USERNAME }}';
+            CCR_PASSWORD='${{ secrets.CCR_PASSWORD }}';
+            WEBHOOK_DEPLOY_KEY='${{ secrets.WEBHOOK_DEPLOY_KEY }}'
+          }
+          foreach($k in $m.Keys){if($m[$k]){"$k=$($m[$k])"|Out-File $env:GITHUB_ENV -Append -Encoding utf8}}
+      - name: build+deploy
+        run: |
+          docker version
+          & ./scripts/deploy-all-docker-prod.ps1 -Target web -EnvName prod -Deploy
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+
+  backend:
+    name: backend
+    if: ${{ github.event.client_payload.do_backend == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ github.event.client_payload.ref }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: secrets
+        run: |
+          $m=@{
+            CCR_USERNAME='${{ secrets.CCR_USERNAME }}';
+            CCR_PASSWORD='${{ secrets.CCR_PASSWORD }}';
+            WEBHOOK_DEPLOY_KEY='${{ secrets.WEBHOOK_DEPLOY_KEY }}'
+          }
+          foreach($k in $m.Keys){if($m[$k]){"$k=$($m[$k])"|Out-File $env:GITHUB_ENV -Append -Encoding utf8}}
+      - name: build+deploy
+        run: |
+          docker version
+          & ./scripts/deploy-all-docker-prod.ps1 -Target backend -EnvName prod -Deploy
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+
+  yaoxiaobai-android:
+    name: yaoxiaobai-android
+    if: ${{ github.event.client_payload.do_yaoxiaobai_android == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ github.event.client_payload.ref }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.6'
+          channel: 'stable'
+          cache: true
+      - name: Cache Gradle + pub + Shorebird
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.pub-cache
+            ~/.shorebird
+          key: ${{ runner.os }}-android-yaoxiaobai-${{ hashFiles('apps/yaoxiaobai/yaoxiaobai_app/pubspec.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-android-yaoxiaobai-
+            ${{ runner.os }}-android-
+      - name: Install Shorebird
+        shell: bash
+        run: |
+          if [ -f "$HOME/.shorebird/bin/shorebird" ]; then
+            echo "Shorebird cached, skipping install"
+          else
+            curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/shorebirdtech/install/main/install.sh | sh
+          fi
+          echo "$HOME/.shorebird/bin" >> $GITHUB_PATH
+      - name: secrets
+        run: |
+          $m=@{
+            SHOREBIRD_TOKEN='${{ secrets.SHOREBIRD_TOKEN }}';
+            YAOXIAOBAI_RELEASE_TOKEN='${{ secrets.YAOXIAOBAI_RELEASE_TOKEN }}';
+            RUSTFS_ACCESS_KEY='${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}';
+            RUSTFS_SECRET_KEY='${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}'
+          }
+          foreach($k in $m.Keys){if($m[$k]){"$k=$($m[$k])"|Out-File $env:GITHUB_ENV -Append -Encoding utf8}}
+      - name: build
+        run: |
+          $a=@{Version='${{ github.event.client_payload.yaoxiaobai_version }}';BuildNumber=[int]'${{ github.event.client_payload.yaoxiaobai_build }}'}
+          if('${{ github.event.client_payload.mode }}'-eq'patch'){$a['Patch']=$true}
+          & ./scripts/build-yaoxiaobai-android-prod.ps1 @a
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+
+  footprint-android:
+    name: footprint-android
+    if: ${{ github.event.client_payload.do_footprint_android == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ github.event.client_payload.ref }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.6'
+          channel: 'stable'
+          cache: true
+      - name: Cache Gradle + pub + Shorebird
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.pub-cache
+            ~/.shorebird
+          key: ${{ runner.os }}-android-footprint-${{ hashFiles('apps/footprint/pubspec.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-android-footprint-
+            ${{ runner.os }}-android-
+      - name: Install Shorebird
+        shell: bash
+        run: |
+          if [ -f "$HOME/.shorebird/bin/shorebird" ]; then
+            echo "Shorebird cached, skipping install"
+          else
+            curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/shorebirdtech/install/main/install.sh | sh
+          fi
+          echo "$HOME/.shorebird/bin" >> $GITHUB_PATH
+      - name: secrets
+        run: |
+          $m=@{
+            SHOREBIRD_TOKEN='${{ secrets.SHOREBIRD_TOKEN }}';
+            DAYMICA_RELEASE_TOKEN='${{ secrets.DAYMICA_RELEASE_TOKEN }}';
+            RUSTFS_ACCESS_KEY='${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}';
+            RUSTFS_SECRET_KEY='${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}'
+          }
+          foreach($k in $m.Keys){if($m[$k]){"$k=$($m[$k])"|Out-File $env:GITHUB_ENV -Append -Encoding utf8}}
+      - name: build
+        run: |
+          $a=@{Version='${{ github.event.client_payload.footprint_version }}';BuildNumber=[int]'${{ github.event.client_payload.footprint_build }}'}
+          if('${{ github.event.client_payload.mode }}'-eq'patch'){$a['Patch']=$true}
+          & ./scripts/build-footprint-android-prod.ps1 @a
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}

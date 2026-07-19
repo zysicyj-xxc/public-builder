@@ -1,17 +1,112 @@
+# Public builder: burn free public GHA minutes while cloning private source via PAT.
+# Trust boundary: only repository_dispatch; treat client_payload as untrusted.
+
 name: Public Builder for Private Repo
 
 on:
   repository_dispatch:
     types: [trigger-build]
 
+# Least privilege for the GITHUB_TOKEN of this public repo (secrets still available).
+permissions:
+  contents: read
+
+concurrency:
+  group: pb-${{ github.event.client_payload.mode }}-${{ github.event.client_payload.ref }}
+  cancel-in-progress: false
+
 defaults:
   run:
     shell: pwsh
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Validate & sanitize dispatch payload before any secret-bearing job runs.
+  # ---------------------------------------------------------------------------
+  validate:
+    name: validate-payload
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      ref: ${{ steps.v.outputs.ref }}
+      mode: ${{ steps.v.outputs.mode }}
+      jobs: ${{ steps.v.outputs.jobs }}
+      daymica_version: ${{ steps.v.outputs.daymica_version }}
+      daymica_build: ${{ steps.v.outputs.daymica_build }}
+      yaoxiaobai_version: ${{ steps.v.outputs.yaoxiaobai_version }}
+      yaoxiaobai_build: ${{ steps.v.outputs.yaoxiaobai_build }}
+      footprint_version: ${{ steps.v.outputs.footprint_version }}
+      footprint_build: ${{ steps.v.outputs.footprint_build }}
+    steps:
+      - name: Validate client_payload
+        id: v
+        env:
+          RAW_REF: ${{ github.event.client_payload.ref }}
+          RAW_MODE: ${{ github.event.client_payload.mode }}
+          RAW_JOBS: ${{ github.event.client_payload.jobs }}
+          RAW_DAYMICA_VERSION: ${{ github.event.client_payload.daymica_version }}
+          RAW_DAYMICA_BUILD: ${{ github.event.client_payload.daymica_build }}
+          RAW_YAOXIAOBAI_VERSION: ${{ github.event.client_payload.yaoxiaobai_version }}
+          RAW_YAOXIAOBAI_BUILD: ${{ github.event.client_payload.yaoxiaobai_build }}
+          RAW_FOOTPRINT_VERSION: ${{ github.event.client_payload.footprint_version }}
+          RAW_FOOTPRINT_BUILD: ${{ github.event.client_payload.footprint_build }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Out([string]$k, [string]$v) {
+            "$k=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          }
+          function Assert-Match([string]$name, [string]$value, [string]$pattern) {
+            if ([string]::IsNullOrWhiteSpace($value)) { throw "$name is empty" }
+            if ($value -notmatch $pattern) { throw "$name failed allowlist: '$value'" }
+            return $value
+          }
+
+          # refs/heads/dev | refs/tags/{app}/YYYYMMDDHHmm
+          $ref = Assert-Match 'ref' $env:RAW_REF.Trim() '^(refs/heads/dev|refs/tags/(daymica|yaoxiaobai|footprint|backend)/[0-9]{12})$'
+          $mode = Assert-Match 'mode' $env:RAW_MODE.Trim() '^(patch|release)$'
+
+          $allowedJobs = @(
+            'daymica-android', 'daymica-windows', 'daymica-web',
+            'yaoxiaobai-android', 'footprint-android', 'backend'
+          )
+          $jobs = @()
+          foreach ($j in ($env:RAW_JOBS -split ',')) {
+            $t = $j.Trim()
+            if (-not $t) { continue }
+            if ($t -notin $allowedJobs) { throw "job not allowed: '$t'" }
+            if ($t -notin $jobs) { $jobs += $t }
+          }
+          if ($jobs.Count -eq 0) { throw 'jobs is empty after allowlist filter' }
+
+          # Version: digits / dots / underscore / hyphen (tag-style YYYYMMDDHHmm ok)
+          $verRe = '^[A-Za-z0-9._-]{1,64}$'
+          $buildRe = '^[0-9]{1,16}$'
+
+          $dv = Assert-Match 'daymica_version' $env:RAW_DAYMICA_VERSION.Trim() $verRe
+          $db = Assert-Match 'daymica_build' $env:RAW_DAYMICA_BUILD.Trim() $buildRe
+          $yv = Assert-Match 'yaoxiaobai_version' $env:RAW_YAOXIAOBAI_VERSION.Trim() $verRe
+          $yb = Assert-Match 'yaoxiaobai_build' $env:RAW_YAOXIAOBAI_BUILD.Trim() $buildRe
+          $fv = Assert-Match 'footprint_version' $env:RAW_FOOTPRINT_VERSION.Trim() $verRe
+          $fb = Assert-Match 'footprint_build' $env:RAW_FOOTPRINT_BUILD.Trim() $buildRe
+
+          # Canonical jobs string wrapped for safe contains() checks
+          $jobsCsv = ',' + ($jobs -join ',') + ','
+
+          Write-Host "OK ref=$ref mode=$mode jobs=$($jobs -join ',')"
+          Out 'ref' $ref
+          Out 'mode' $mode
+          Out 'jobs' $jobsCsv
+          Out 'daymica_version' $dv
+          Out 'daymica_build' $db
+          Out 'yaoxiaobai_version' $yv
+          Out 'yaoxiaobai_build' $yb
+          Out 'footprint_version' $fv
+          Out 'footprint_build' $fb
+
   daymica-android:
     name: daymica-android
-    if: ${{ contains(github.event.client_payload.jobs, 'daymica-android') }}
+    needs: validate
+    if: ${{ contains(needs.validate.outputs.jobs, ',daymica-android,') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -19,7 +114,8 @@ jobs:
         with:
           repository: zysicyj-xxc/zysicyj
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          ref: ${{ github.event.client_payload.ref }}
+          ref: ${{ needs.validate.outputs.ref }}
+          persist-credentials: false
       - uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
@@ -36,6 +132,7 @@ jobs:
             ~/.gradle/caches
             ~/.gradle/wrapper
             ~/.pub-cache
+            ~/.config/shorebird
             ~/.shorebird
           key: ${{ runner.os }}-android-daymica-${{ hashFiles('apps/daymica/pubspec.lock', 'apps/daymica/android/build.gradle') }}
           restore-keys: |
@@ -44,33 +141,42 @@ jobs:
       - name: Install Shorebird
         shell: bash
         run: |
-          if [ -f "$HOME/.shorebird/bin/shorebird" ]; then
-            echo "Shorebird cached, skipping install"
+          set -euo pipefail
+          if [ -x "$HOME/.config/shorebird/bin/shorebird" ]; then
+            echo "$HOME/.config/shorebird/bin" >> "$GITHUB_PATH"
+          elif [ -x "$HOME/.shorebird/bin/shorebird" ]; then
+            echo "$HOME/.shorebird/bin" >> "$GITHUB_PATH"
           else
             curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/shorebirdtech/install/main/install.sh | bash
+            if [ -x "$HOME/.config/shorebird/bin/shorebird" ]; then
+              echo "$HOME/.config/shorebird/bin" >> "$GITHUB_PATH"
+            else
+              echo "$HOME/.shorebird/bin" >> "$GITHUB_PATH"
+            fi
           fi
-          echo "$HOME/.shorebird/bin" >> $GITHUB_PATH
-      - name: secrets
-        run: |
-          $m=@{
-            SHOREBIRD_TOKEN='${{ secrets.SHOREBIRD_TOKEN }}';
-            DAYMICA_RELEASE_TOKEN='${{ secrets.DAYMICA_RELEASE_TOKEN }}';
-            RUSTFS_ACCESS_KEY='${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}';
-            RUSTFS_SECRET_KEY='${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}';
-            DAYMICA_RUSTFS_ACCESS_KEY='${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}';
-            DAYMICA_RUSTFS_SECRET_KEY='${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}'
-          }
-          foreach($k in $m.Keys){if($m[$k]){"$k=$($m[$k])"|Out-File $env:GITHUB_ENV -Append -Encoding utf8}}
       - name: build
+        env:
+          APP_VERSION: ${{ needs.validate.outputs.daymica_version }}
+          APP_BUILD: ${{ needs.validate.outputs.daymica_build }}
+          APP_MODE: ${{ needs.validate.outputs.mode }}
+          SHOREBIRD_TOKEN: ${{ secrets.SHOREBIRD_TOKEN }}
+          DAYMICA_RELEASE_TOKEN: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
+          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+          DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
         run: |
-          $a=@{Version='${{ github.event.client_payload.daymica_version }}';BuildNumber=${{ github.event.client_payload.daymica_build }}}
-          if('${{ github.event.client_payload.mode }}'-eq'patch'){$a['Patch']=$true}
+          $ErrorActionPreference = 'Stop'
+          if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
+          $a = @{ Version = $env:APP_VERSION; BuildNumber = [int]$env:APP_BUILD }
+          if ($env:APP_MODE -eq 'patch') { $a['Patch'] = $true }
           & ./scripts/build-daymica-android-prod.ps1 @a
-          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   daymica-windows:
     name: daymica-windows
-    if: ${{ contains(github.event.client_payload.jobs, 'daymica-windows') }}
+    needs: validate
+    if: ${{ contains(needs.validate.outputs.jobs, ',daymica-windows,') }}
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
@@ -78,7 +184,8 @@ jobs:
         with:
           repository: zysicyj-xxc/zysicyj
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          ref: ${{ github.event.client_payload.ref }}
+          ref: ${{ needs.validate.outputs.ref }}
+          persist-credentials: false
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.41.6'
@@ -94,24 +201,25 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-windows-daymica-
             ${{ runner.os }}-windows-
-      - name: secrets
-        run: |
-          $m=@{
-            DAYMICA_RELEASE_TOKEN='${{ secrets.DAYMICA_RELEASE_TOKEN }}';
-            RUSTFS_ACCESS_KEY='${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}';
-            RUSTFS_SECRET_KEY='${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}';
-            DAYMICA_RUSTFS_ACCESS_KEY='${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}';
-            DAYMICA_RUSTFS_SECRET_KEY='${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}'
-          }
-          foreach($k in $m.Keys){if($m[$k]){"$k=$($m[$k])"|Out-File $env:GITHUB_ENV -Append -Encoding utf8}}
       - name: build
+        env:
+          APP_VERSION: ${{ needs.validate.outputs.daymica_version }}
+          APP_BUILD: ${{ needs.validate.outputs.daymica_build }}
+          DAYMICA_RELEASE_TOKEN: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
+          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+          DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
         run: |
-          & ./scripts/build-flutter-windows-prod.ps1 -AppSlug daymica -Version '${{ github.event.client_payload.daymica_version }}' -BuildNumber ${{ github.event.client_payload.daymica_build }}
-          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          $ErrorActionPreference = 'Stop'
+          if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
+          & ./scripts/build-flutter-windows-prod.ps1 -AppSlug daymica -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   daymica-web:
     name: daymica-web
-    if: ${{ contains(github.event.client_payload.jobs, 'daymica-web') }}
+    needs: validate
+    if: ${{ contains(needs.validate.outputs.jobs, ',daymica-web,') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -119,26 +227,25 @@ jobs:
         with:
           repository: zysicyj-xxc/zysicyj
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          ref: ${{ github.event.client_payload.ref }}
+          ref: ${{ needs.validate.outputs.ref }}
+          persist-credentials: false
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      - name: secrets
-        run: |
-          $m=@{
-            CCR_USERNAME='${{ secrets.CCR_USERNAME }}';
-            CCR_PASSWORD='${{ secrets.CCR_PASSWORD }}';
-            WEBHOOK_DEPLOY_KEY='${{ secrets.WEBHOOK_DEPLOY_KEY }}'
-          }
-          foreach($k in $m.Keys){if($m[$k]){"$k=$($m[$k])"|Out-File $env:GITHUB_ENV -Append -Encoding utf8}}
       - name: build+deploy
+        env:
+          CCR_USERNAME: ${{ secrets.CCR_USERNAME }}
+          CCR_PASSWORD: ${{ secrets.CCR_PASSWORD }}
+          WEBHOOK_DEPLOY_KEY: ${{ secrets.WEBHOOK_DEPLOY_KEY }}
         run: |
+          $ErrorActionPreference = 'Stop'
           docker version
           & ./scripts/deploy-all-docker-prod.ps1 -Target web -EnvName prod -Deploy
-          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   backend:
     name: backend
-    if: ${{ contains(github.event.client_payload.jobs, 'backend') }}
+    needs: validate
+    if: ${{ contains(needs.validate.outputs.jobs, ',backend,') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -146,26 +253,25 @@ jobs:
         with:
           repository: zysicyj-xxc/zysicyj
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          ref: ${{ github.event.client_payload.ref }}
+          ref: ${{ needs.validate.outputs.ref }}
+          persist-credentials: false
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      - name: secrets
-        run: |
-          $m=@{
-            CCR_USERNAME='${{ secrets.CCR_USERNAME }}';
-            CCR_PASSWORD='${{ secrets.CCR_PASSWORD }}';
-            WEBHOOK_DEPLOY_KEY='${{ secrets.WEBHOOK_DEPLOY_KEY }}'
-          }
-          foreach($k in $m.Keys){if($m[$k]){"$k=$($m[$k])"|Out-File $env:GITHUB_ENV -Append -Encoding utf8}}
       - name: build+deploy
+        env:
+          CCR_USERNAME: ${{ secrets.CCR_USERNAME }}
+          CCR_PASSWORD: ${{ secrets.CCR_PASSWORD }}
+          WEBHOOK_DEPLOY_KEY: ${{ secrets.WEBHOOK_DEPLOY_KEY }}
         run: |
+          $ErrorActionPreference = 'Stop'
           docker version
           & ./scripts/deploy-all-docker-prod.ps1 -Target backend -EnvName prod -Deploy
-          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   yaoxiaobai-android:
     name: yaoxiaobai-android
-    if: ${{ contains(github.event.client_payload.jobs, 'yaoxiaobai-android') }}
+    needs: validate
+    if: ${{ contains(needs.validate.outputs.jobs, ',yaoxiaobai-android,') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -173,7 +279,8 @@ jobs:
         with:
           repository: zysicyj-xxc/zysicyj
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          ref: ${{ github.event.client_payload.ref }}
+          ref: ${{ needs.validate.outputs.ref }}
+          persist-credentials: false
       - uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
@@ -190,6 +297,7 @@ jobs:
             ~/.gradle/caches
             ~/.gradle/wrapper
             ~/.pub-cache
+            ~/.config/shorebird
             ~/.shorebird
           key: ${{ runner.os }}-android-yaoxiaobai-${{ hashFiles('apps/yaoxiaobai/yaoxiaobai_app/pubspec.lock') }}
           restore-keys: |
@@ -198,31 +306,40 @@ jobs:
       - name: Install Shorebird
         shell: bash
         run: |
-          if [ -f "$HOME/.shorebird/bin/shorebird" ]; then
-            echo "Shorebird cached, skipping install"
+          set -euo pipefail
+          if [ -x "$HOME/.config/shorebird/bin/shorebird" ]; then
+            echo "$HOME/.config/shorebird/bin" >> "$GITHUB_PATH"
+          elif [ -x "$HOME/.shorebird/bin/shorebird" ]; then
+            echo "$HOME/.shorebird/bin" >> "$GITHUB_PATH"
           else
             curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/shorebirdtech/install/main/install.sh | bash
+            if [ -x "$HOME/.config/shorebird/bin/shorebird" ]; then
+              echo "$HOME/.config/shorebird/bin" >> "$GITHUB_PATH"
+            else
+              echo "$HOME/.shorebird/bin" >> "$GITHUB_PATH"
+            fi
           fi
-          echo "$HOME/.shorebird/bin" >> $GITHUB_PATH
-      - name: secrets
-        run: |
-          $m=@{
-            SHOREBIRD_TOKEN='${{ secrets.SHOREBIRD_TOKEN }}';
-            YAOXIAOBAI_RELEASE_TOKEN='${{ secrets.YAOXIAOBAI_RELEASE_TOKEN }}';
-            RUSTFS_ACCESS_KEY='${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}';
-            RUSTFS_SECRET_KEY='${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}'
-          }
-          foreach($k in $m.Keys){if($m[$k]){"$k=$($m[$k])"|Out-File $env:GITHUB_ENV -Append -Encoding utf8}}
       - name: build
+        env:
+          APP_VERSION: ${{ needs.validate.outputs.yaoxiaobai_version }}
+          APP_BUILD: ${{ needs.validate.outputs.yaoxiaobai_build }}
+          APP_MODE: ${{ needs.validate.outputs.mode }}
+          SHOREBIRD_TOKEN: ${{ secrets.SHOREBIRD_TOKEN }}
+          YAOXIAOBAI_RELEASE_TOKEN: ${{ secrets.YAOXIAOBAI_RELEASE_TOKEN }}
+          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
         run: |
-          $a=@{Version='${{ github.event.client_payload.yaoxiaobai_version }}';BuildNumber=${{ github.event.client_payload.yaoxiaobai_build }}}
-          if('${{ github.event.client_payload.mode }}'-eq'patch'){$a['Patch']=$true}
+          $ErrorActionPreference = 'Stop'
+          if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
+          $a = @{ Version = $env:APP_VERSION; BuildNumber = [int]$env:APP_BUILD }
+          if ($env:APP_MODE -eq 'patch') { $a['Patch'] = $true }
           & ./scripts/build-yaoxiaobai-android-prod.ps1 @a
-          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   footprint-android:
     name: footprint-android
-    if: ${{ contains(github.event.client_payload.jobs, 'footprint-android') }}
+    needs: validate
+    if: ${{ contains(needs.validate.outputs.jobs, ',footprint-android,') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -230,7 +347,8 @@ jobs:
         with:
           repository: zysicyj-xxc/zysicyj
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          ref: ${{ github.event.client_payload.ref }}
+          ref: ${{ needs.validate.outputs.ref }}
+          persist-credentials: false
       - uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
@@ -247,6 +365,7 @@ jobs:
             ~/.gradle/caches
             ~/.gradle/wrapper
             ~/.pub-cache
+            ~/.config/shorebird
             ~/.shorebird
           key: ${{ runner.os }}-android-footprint-${{ hashFiles('apps/footprint/pubspec.lock') }}
           restore-keys: |
@@ -255,24 +374,32 @@ jobs:
       - name: Install Shorebird
         shell: bash
         run: |
-          if [ -f "$HOME/.shorebird/bin/shorebird" ]; then
-            echo "Shorebird cached, skipping install"
+          set -euo pipefail
+          if [ -x "$HOME/.config/shorebird/bin/shorebird" ]; then
+            echo "$HOME/.config/shorebird/bin" >> "$GITHUB_PATH"
+          elif [ -x "$HOME/.shorebird/bin/shorebird" ]; then
+            echo "$HOME/.shorebird/bin" >> "$GITHUB_PATH"
           else
             curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/shorebirdtech/install/main/install.sh | bash
+            if [ -x "$HOME/.config/shorebird/bin/shorebird" ]; then
+              echo "$HOME/.config/shorebird/bin" >> "$GITHUB_PATH"
+            else
+              echo "$HOME/.shorebird/bin" >> "$GITHUB_PATH"
+            fi
           fi
-          echo "$HOME/.shorebird/bin" >> $GITHUB_PATH
-      - name: secrets
-        run: |
-          $m=@{
-            SHOREBIRD_TOKEN='${{ secrets.SHOREBIRD_TOKEN }}';
-            DAYMICA_RELEASE_TOKEN='${{ secrets.DAYMICA_RELEASE_TOKEN }}';
-            RUSTFS_ACCESS_KEY='${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}';
-            RUSTFS_SECRET_KEY='${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}'
-          }
-          foreach($k in $m.Keys){if($m[$k]){"$k=$($m[$k])"|Out-File $env:GITHUB_ENV -Append -Encoding utf8}}
       - name: build
+        env:
+          APP_VERSION: ${{ needs.validate.outputs.footprint_version }}
+          APP_BUILD: ${{ needs.validate.outputs.footprint_build }}
+          APP_MODE: ${{ needs.validate.outputs.mode }}
+          SHOREBIRD_TOKEN: ${{ secrets.SHOREBIRD_TOKEN }}
+          DAYMICA_RELEASE_TOKEN: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
+          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
         run: |
-          $a=@{Version='${{ github.event.client_payload.footprint_version }}';BuildNumber=${{ github.event.client_payload.footprint_build }}}
-          if('${{ github.event.client_payload.mode }}'-eq'patch'){$a['Patch']=$true}
+          $ErrorActionPreference = 'Stop'
+          if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
+          $a = @{ Version = $env:APP_VERSION; BuildNumber = [int]$env:APP_BUILD }
+          if ($env:APP_MODE -eq 'patch') { $a['Patch'] = $true }
           & ./scripts/build-footprint-android-prod.ps1 @a
-          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

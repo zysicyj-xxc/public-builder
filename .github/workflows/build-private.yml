@@ -165,9 +165,18 @@ jobs:
           RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
           DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
           DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+          # Release signing (same keystore as historical CNB builds)
+          DAYMICA_ANDROID_KEYSTORE_BASE64: ${{ secrets.DAYMICA_ANDROID_KEYSTORE_BASE64 }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
         run: |
           $ErrorActionPreference = 'Stop'
           if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
+          if ([string]::IsNullOrWhiteSpace($env:DAYMICA_ANDROID_KEYSTORE_BASE64)) { throw 'DAYMICA_ANDROID_KEYSTORE_BASE64 secret missing' }
+          if ([string]::IsNullOrWhiteSpace($env:KEY_PASSWORD)) { throw 'KEY_PASSWORD secret missing' }
+          if ([string]::IsNullOrWhiteSpace($env:STORE_PASSWORD)) { throw 'STORE_PASSWORD secret missing' }
+          if ([string]::IsNullOrWhiteSpace($env:KEY_ALIAS)) { $env:KEY_ALIAS = 'daymica' }
           $a = @{ Version = $env:APP_VERSION; BuildNumber = [int]$env:APP_BUILD }
           if ($env:APP_MODE -eq 'patch') { $a['Patch'] = $true }
           & ./scripts/build-daymica-android-prod.ps1 @a

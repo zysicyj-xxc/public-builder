@@ -37,6 +37,7 @@ jobs:
       yaoxiaobai_build: ${{ steps.v.outputs.yaoxiaobai_build }}
       footprint_version: ${{ steps.v.outputs.footprint_version }}
       footprint_build: ${{ steps.v.outputs.footprint_build }}
+      backend_url: ${{ steps.v.outputs.backend_url }}
     steps:
       - name: Validate client_payload
         id: v
@@ -50,6 +51,7 @@ jobs:
           RAW_YAOXIAOBAI_BUILD: ${{ github.event.client_payload.yaoxiaobai_build }}
           RAW_FOOTPRINT_VERSION: ${{ github.event.client_payload.footprint_version }}
           RAW_FOOTPRINT_BUILD: ${{ github.event.client_payload.footprint_build }}
+          RAW_BACKEND_URL: ${{ github.event.client_payload.backend_url }}
         run: |
           $ErrorActionPreference = 'Stop'
           function Out([string]$k, [string]$v) {
@@ -88,6 +90,7 @@ jobs:
           $yb = Assert-Match 'yaoxiaobai_build' $env:RAW_YAOXIAOBAI_BUILD.Trim() $buildRe
           $fv = Assert-Match 'footprint_version' $env:RAW_FOOTPRINT_VERSION.Trim() $verRe
           $fb = Assert-Match 'footprint_build' $env:RAW_FOOTPRINT_BUILD.Trim() $buildRe
+          $backendUrl = Assert-Match 'backend_url' $env:RAW_BACKEND_URL.Trim() '^https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?(?:/[^\s]*)?$'
 
           # Canonical jobs string wrapped for safe contains() checks
           $jobsCsv = ',' + ($jobs -join ',') + ','
@@ -102,6 +105,7 @@ jobs:
           Out 'yaoxiaobai_build' $yb
           Out 'footprint_version' $fv
           Out 'footprint_build' $fb
+          Out 'backend_url' $backendUrl
 
   daymica-android:
     name: daymica-android
@@ -159,6 +163,7 @@ jobs:
           APP_VERSION: ${{ needs.validate.outputs.daymica_version }}
           APP_BUILD: ${{ needs.validate.outputs.daymica_build }}
           APP_MODE: ${{ needs.validate.outputs.mode }}
+          ZYSICYJ_BACKEND_HOST: ${{ needs.validate.outputs.backend_url }}
           SHOREBIRD_TOKEN: ${{ secrets.SHOREBIRD_TOKEN }}
           DAYMICA_RELEASE_TOKEN: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
           RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
@@ -333,6 +338,7 @@ jobs:
           APP_VERSION: ${{ needs.validate.outputs.yaoxiaobai_version }}
           APP_BUILD: ${{ needs.validate.outputs.yaoxiaobai_build }}
           APP_MODE: ${{ needs.validate.outputs.mode }}
+          ZYSICYJ_BACKEND_HOST: ${{ needs.validate.outputs.backend_url }}
           SHOREBIRD_TOKEN: ${{ secrets.SHOREBIRD_TOKEN }}
           YAOXIAOBAI_RELEASE_TOKEN: ${{ secrets.YAOXIAOBAI_RELEASE_TOKEN }}
           RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}

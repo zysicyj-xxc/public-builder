@@ -80,7 +80,8 @@ jobs:
             'daymica-android', 'daymica-windows', 'daymica-web',
             'yaoxiaobai-android', 'footprint-android', 'backend',
             'aiusage-windows', 'aiusage-android', 'easyshell-windows',
-            'systemmonitor-windows', 'passwordvault-windows'
+            'systemmonitor-windows', 'passwordvault-windows',
+            'cleanmaster-windows'
           )
           $jobs = @()
           foreach ($j in ($env:RAW_JOBS -split ',')) {
@@ -653,4 +654,47 @@ jobs:
           $ErrorActionPreference = 'Stop'
           if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
           & ./scripts/build-passwordvault-windows-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  cleanmaster-windows:
+    name: cleanmaster-windows
+    needs: validate
+    if: ${{ contains(needs.validate.outputs.jobs, ',cleanmaster-windows,') }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.validate.outputs.ref }}
+          persist-credentials: false
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.6'
+          channel: 'stable'
+          cache: true
+      - name: Cache pub + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pub-cache
+            apps/clean-master/build
+          key: ${{ runner.os }}-windows-cleanmaster-${{ hashFiles('apps/clean-master/pubspec.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-windows-cleanmaster-
+            ${{ runner.os }}-windows-
+      - name: build
+        env:
+          APP_VERSION: ${{ needs.validate.outputs.newapp_version }}
+          APP_BUILD: ${{ needs.validate.outputs.newapp_build }}
+          DAYMICA_RELEASE_TOKEN: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
+          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+          DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
+          & ./scripts/build-cleanmaster-windows-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -282,17 +282,20 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
           ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: build+deploy
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache-dependency-path: backend/go.sum
+      - name: build+deploy (native systemd)
         env:
-          CCR_USERNAME: ${{ secrets.CCR_USERNAME }}
-          CCR_PASSWORD: ${{ secrets.CCR_PASSWORD }}
+          DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
           WEBHOOK_DEPLOY_KEY: ${{ secrets.WEBHOOK_DEPLOY_KEY }}
         run: |
           $ErrorActionPreference = 'Stop'
-          docker version
-          & ./scripts/deploy-all-docker-prod.ps1 -Target backend -EnvName prod -Deploy
+          & ./scripts/deploy-backend-native-prod.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   yaoxiaobai-android:

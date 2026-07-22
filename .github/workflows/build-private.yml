@@ -47,15 +47,11 @@ jobs:
           RAW_REF: ${{ github.event.client_payload.ref }}
           RAW_MODE: ${{ github.event.client_payload.mode }}
           RAW_JOBS: ${{ github.event.client_payload.jobs }}
-          RAW_DAYMICA_VERSION: ${{ github.event.client_payload.daymica_version }}
-          RAW_DAYMICA_BUILD: ${{ github.event.client_payload.daymica_build }}
-          RAW_YAOXIAOBAI_VERSION: ${{ github.event.client_payload.yaoxiaobai_version }}
-          RAW_YAOXIAOBAI_BUILD: ${{ github.event.client_payload.yaoxiaobai_build }}
-          RAW_FOOTPRINT_VERSION: ${{ github.event.client_payload.footprint_version }}
-          RAW_FOOTPRINT_BUILD: ${{ github.event.client_payload.footprint_build }}
+          RAW_DAYMICA: ${{ github.event.client_payload.daymica }}
+          RAW_YAOXIAOBAI: ${{ github.event.client_payload.yaoxiaobai }}
+          RAW_FOOTPRINT: ${{ github.event.client_payload.footprint }}
+          RAW_NEWAPP: ${{ github.event.client_payload.newapp }}
           RAW_BACKEND_URL: ${{ github.event.client_payload.backend_url }}
-          RAW_NEWAPP_VERSION: ${{ github.event.client_payload.newapp_version }}
-          RAW_NEWAPP_BUILD: ${{ github.event.client_payload.newapp_build }}
         run: |
           $ErrorActionPreference = 'Stop'
           function Out([string]$k, [string]$v) {
@@ -65,6 +61,15 @@ jobs:
             if ([string]::IsNullOrWhiteSpace($value)) { throw "$name is empty" }
             if ($value -notmatch $pattern) { throw "$name failed allowlist: '$value'" }
             return $value
+          }
+          # Split combined "version+build" (repository_dispatch caps client_payload at 10 props).
+          function Split-VerBuild([string]$name, [string]$value, [string]$vre, [string]$bre) {
+            $t = if ($null -eq $value) { '' } else { $value.Trim() }
+            if ([string]::IsNullOrWhiteSpace($t)) { return , @('0', '0') }
+            $parts = $t -split '\+', 2
+            $v = Assert-Match "${name}_version" $parts[0] $vre
+            $b = if ($parts.Count -ge 2 -and $parts[1]) { Assert-Match "${name}_build" $parts[1] $bre } else { '0' }
+            return , @($v, $b)
           }
 
           # refs/heads/dev | refs/tags/{app}/YYYYMMDDHHmm
@@ -90,16 +95,13 @@ jobs:
           $verRe = '^[A-Za-z0-9._-]{1,64}$'
           $buildRe = '^[0-9]{1,16}$'
 
-          $dv = Assert-Match 'daymica_version' $env:RAW_DAYMICA_VERSION.Trim() $verRe
-          $db = Assert-Match 'daymica_build' $env:RAW_DAYMICA_BUILD.Trim() $buildRe
-          $yv = Assert-Match 'yaoxiaobai_version' $env:RAW_YAOXIAOBAI_VERSION.Trim() $verRe
-          $yb = Assert-Match 'yaoxiaobai_build' $env:RAW_YAOXIAOBAI_BUILD.Trim() $buildRe
-          $fv = Assert-Match 'footprint_version' $env:RAW_FOOTPRINT_VERSION.Trim() $verRe
-          $fb = Assert-Match 'footprint_build' $env:RAW_FOOTPRINT_BUILD.Trim() $buildRe
+          # Combined "version+build" fields (payload prop cap = 10). daymica/yaoxiaobai/footprint
+          # always sent from pubspec; newapp is '0+0' unless a new-app tag was pushed.
+          $d = Split-VerBuild 'daymica' $env:RAW_DAYMICA $verRe $buildRe; $dv = $d[0]; $db = $d[1]
+          $y = Split-VerBuild 'yaoxiaobai' $env:RAW_YAOXIAOBAI $verRe $buildRe; $yv = $y[0]; $yb = $y[1]
+          $f = Split-VerBuild 'footprint' $env:RAW_FOOTPRINT $verRe $buildRe; $fv = $f[0]; $fb = $f[1]
+          $n = Split-VerBuild 'newapp' $env:RAW_NEWAPP $verRe $buildRe; $nv = $n[0]; $nb = $n[1]
           $backendUrl = Assert-Match 'backend_url' $env:RAW_BACKEND_URL.Trim() '^https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?(?:/[^\s]*)?$'
-          # New app (single per tag); tolerate '0' defaults from non-new-app releases.
-          $nv = if ([string]::IsNullOrWhiteSpace($env:RAW_NEWAPP_VERSION)) { '0' } else { Assert-Match 'newapp_version' $env:RAW_NEWAPP_VERSION.Trim() $verRe }
-          $nb = if ([string]::IsNullOrWhiteSpace($env:RAW_NEWAPP_BUILD)) { '0' } else { Assert-Match 'newapp_build' $env:RAW_NEWAPP_BUILD.Trim() $buildRe }
 
           # Canonical jobs string wrapped for safe contains() checks
           $jobsCsv = ',' + ($jobs -join ',') + ','

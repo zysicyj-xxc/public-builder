@@ -73,7 +73,7 @@ jobs:
           }
 
           # refs/heads/dev | refs/tags/{app}/YYYYMMDDHHmm
-          $ref = Assert-Match 'ref' $env:RAW_REF.Trim() '^(refs/heads/dev|refs/tags/(daymica|yaoxiaobai|footprint|backend|ai-usage|easy-shell|system-monitor|password-vault)/[0-9]{12})$'
+          $ref = Assert-Match 'ref' $env:RAW_REF.Trim() '^(refs/heads/dev|refs/tags/(daymica|yaoxiaobai|footprint|backend|ai-usage|easy-shell|system-monitor|password-vault|clean-master)/[0-9]{12})$'
           $mode = Assert-Match 'mode' $env:RAW_MODE.Trim() '^(patch|release)$'
 
           $allowedJobs = @(

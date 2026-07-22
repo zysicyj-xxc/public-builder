@@ -38,6 +38,8 @@ jobs:
       footprint_version: ${{ steps.v.outputs.footprint_version }}
       footprint_build: ${{ steps.v.outputs.footprint_build }}
       backend_url: ${{ steps.v.outputs.backend_url }}
+      newapp_version: ${{ steps.v.outputs.newapp_version }}
+      newapp_build: ${{ steps.v.outputs.newapp_build }}
     steps:
       - name: Validate client_payload
         id: v
@@ -52,6 +54,8 @@ jobs:
           RAW_FOOTPRINT_VERSION: ${{ github.event.client_payload.footprint_version }}
           RAW_FOOTPRINT_BUILD: ${{ github.event.client_payload.footprint_build }}
           RAW_BACKEND_URL: ${{ github.event.client_payload.backend_url }}
+          RAW_NEWAPP_VERSION: ${{ github.event.client_payload.newapp_version }}
+          RAW_NEWAPP_BUILD: ${{ github.event.client_payload.newapp_build }}
         run: |
           $ErrorActionPreference = 'Stop'
           function Out([string]$k, [string]$v) {
@@ -64,12 +68,14 @@ jobs:
           }
 
           # refs/heads/dev | refs/tags/{app}/YYYYMMDDHHmm
-          $ref = Assert-Match 'ref' $env:RAW_REF.Trim() '^(refs/heads/dev|refs/tags/(daymica|yaoxiaobai|footprint|backend)/[0-9]{12})$'
+          $ref = Assert-Match 'ref' $env:RAW_REF.Trim() '^(refs/heads/dev|refs/tags/(daymica|yaoxiaobai|footprint|backend|ai-usage|easy-shell|system-monitor|password-vault)/[0-9]{12})$'
           $mode = Assert-Match 'mode' $env:RAW_MODE.Trim() '^(patch|release)$'
 
           $allowedJobs = @(
             'daymica-android', 'daymica-windows', 'daymica-web',
-            'yaoxiaobai-android', 'footprint-android', 'backend'
+            'yaoxiaobai-android', 'footprint-android', 'backend',
+            'aiusage-windows', 'aiusage-android', 'easyshell-windows',
+            'systemmonitor-windows', 'passwordvault-windows'
           )
           $jobs = @()
           foreach ($j in ($env:RAW_JOBS -split ',')) {
@@ -91,6 +97,9 @@ jobs:
           $fv = Assert-Match 'footprint_version' $env:RAW_FOOTPRINT_VERSION.Trim() $verRe
           $fb = Assert-Match 'footprint_build' $env:RAW_FOOTPRINT_BUILD.Trim() $buildRe
           $backendUrl = Assert-Match 'backend_url' $env:RAW_BACKEND_URL.Trim() '^https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?(?:/[^\s]*)?$'
+          # New app (single per tag); tolerate '0' defaults from non-new-app releases.
+          $nv = if ([string]::IsNullOrWhiteSpace($env:RAW_NEWAPP_VERSION)) { '0' } else { Assert-Match 'newapp_version' $env:RAW_NEWAPP_VERSION.Trim() $verRe }
+          $nb = if ([string]::IsNullOrWhiteSpace($env:RAW_NEWAPP_BUILD)) { '0' } else { Assert-Match 'newapp_build' $env:RAW_NEWAPP_BUILD.Trim() $buildRe }
 
           # Canonical jobs string wrapped for safe contains() checks
           $jobsCsv = ',' + ($jobs -join ',') + ','
@@ -106,6 +115,8 @@ jobs:
           Out 'footprint_version' $fv
           Out 'footprint_build' $fb
           Out 'backend_url' $backendUrl
+          Out 'newapp_version' $nv
+          Out 'newapp_build' $nb
 
   daymica-android:
     name: daymica-android
@@ -417,4 +428,224 @@ jobs:
           $a = @{ Version = $env:APP_VERSION; BuildNumber = [int]$env:APP_BUILD }
           if ($env:APP_MODE -eq 'patch') { $a['Patch'] = $true }
           & ./scripts/build-footprint-android-prod.ps1 @a
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  aiusage-windows:
+    name: aiusage-windows
+    needs: validate
+    if: ${{ contains(needs.validate.outputs.jobs, ',aiusage-windows,') }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.validate.outputs.ref }}
+          persist-credentials: false
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.6'
+          channel: 'stable'
+          cache: true
+      - name: Cache pub + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pub-cache
+            apps/ai-usage/build
+          key: ${{ runner.os }}-windows-aiusage-${{ hashFiles('apps/ai-usage/pubspec.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-windows-aiusage-
+            ${{ runner.os }}-windows-
+      - name: build
+        env:
+          APP_VERSION: ${{ needs.validate.outputs.newapp_version }}
+          APP_BUILD: ${{ needs.validate.outputs.newapp_build }}
+          DAYMICA_RELEASE_TOKEN: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
+          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+          DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
+          & ./scripts/build-aiusage-windows-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  aiusage-android:
+    name: aiusage-android
+    needs: validate
+    if: ${{ contains(needs.validate.outputs.jobs, ',aiusage-android,') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.validate.outputs.ref }}
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.6'
+          channel: 'stable'
+          cache: true
+      - name: Cache Gradle + pub
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.pub-cache
+          key: ${{ runner.os }}-android-aiusage-${{ hashFiles('apps/ai-usage/pubspec.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-android-aiusage-
+            ${{ runner.os }}-android-
+      - name: build
+        env:
+          APP_VERSION: ${{ needs.validate.outputs.newapp_version }}
+          APP_BUILD: ${{ needs.validate.outputs.newapp_build }}
+          DAYMICA_RELEASE_TOKEN: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
+          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+          DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
+          & ./scripts/build-aiusage-android-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  easyshell-windows:
+    name: easyshell-windows
+    needs: validate
+    if: ${{ contains(needs.validate.outputs.jobs, ',easyshell-windows,') }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.validate.outputs.ref }}
+          persist-credentials: false
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.6'
+          channel: 'stable'
+          cache: true
+      - name: Cache pub + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pub-cache
+            apps/easy-shell/build
+          key: ${{ runner.os }}-windows-easyshell-${{ hashFiles('apps/easy-shell/pubspec.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-windows-easyshell-
+            ${{ runner.os }}-windows-
+      - name: build
+        env:
+          APP_VERSION: ${{ needs.validate.outputs.newapp_version }}
+          APP_BUILD: ${{ needs.validate.outputs.newapp_build }}
+          DAYMICA_RELEASE_TOKEN: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
+          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+          DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
+          & ./scripts/build-easyshell-windows-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  systemmonitor-windows:
+    name: systemmonitor-windows
+    needs: validate
+    if: ${{ contains(needs.validate.outputs.jobs, ',systemmonitor-windows,') }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.validate.outputs.ref }}
+          persist-credentials: false
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.6'
+          channel: 'stable'
+          cache: true
+      - name: Cache pub + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pub-cache
+            apps/system-monitor/build
+          key: ${{ runner.os }}-windows-systemmonitor-${{ hashFiles('apps/system-monitor/pubspec.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-windows-systemmonitor-
+            ${{ runner.os }}-windows-
+      - name: build
+        env:
+          APP_VERSION: ${{ needs.validate.outputs.newapp_version }}
+          APP_BUILD: ${{ needs.validate.outputs.newapp_build }}
+          DAYMICA_RELEASE_TOKEN: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
+          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+          DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
+          & ./scripts/build-systemmonitor-windows-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  passwordvault-windows:
+    name: passwordvault-windows
+    needs: validate
+    if: ${{ contains(needs.validate.outputs.jobs, ',passwordvault-windows,') }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.validate.outputs.ref }}
+          persist-credentials: false
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.6'
+          channel: 'stable'
+          cache: true
+      - name: Cache pub + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pub-cache
+            apps/password-vault/build
+          key: ${{ runner.os }}-windows-passwordvault-${{ hashFiles('apps/password-vault/pubspec.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-windows-passwordvault-
+            ${{ runner.os }}-windows-
+      - name: build
+        env:
+          APP_VERSION: ${{ needs.validate.outputs.newapp_version }}
+          APP_BUILD: ${{ needs.validate.outputs.newapp_build }}
+          DAYMICA_RELEASE_TOKEN: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
+          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+          DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
+          & ./scripts/build-passwordvault-windows-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

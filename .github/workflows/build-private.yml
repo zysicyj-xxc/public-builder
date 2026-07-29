@@ -72,9 +72,9 @@ jobs:
             return , @($v, $b)
           }
 
-          # refs/heads/dev | refs/tags/{app}/YYYYMMDDHHmm
-          $ref = Assert-Match 'ref' $env:RAW_REF.Trim() '^(refs/heads/dev|refs/tags/(daymica|yaoxiaobai|footprint|backend|ai-usage|easy-shell|system-monitor|password-vault|clean-master|eye-care)/[0-9]{12})$'
-          $mode = Assert-Match 'mode' $env:RAW_MODE.Trim() '^(patch|release)$'
+          # refs/tags/{app}/YYYYMMDDHHmm（热更已下线，不再接受 refs/heads/dev）
+          $ref = Assert-Match 'ref' $env:RAW_REF.Trim() '^refs/tags/(daymica|yaoxiaobai|footprint|backend|ai-usage|easy-shell|system-monitor|password-vault|clean-master|eye-care)/[0-9]{12}$'
+          $mode = Assert-Match 'mode' $env:RAW_MODE.Trim() '^release$'
 
           $allowedJobs = @(
             'daymica-android', 'daymica-windows', 'daymica-web',
@@ -143,42 +143,22 @@ jobs:
           flutter-version: '3.41.6'
           channel: 'stable'
           cache: true
-      - name: Cache Gradle + pub + Shorebird
+      - name: Cache Gradle + pub
         uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
             ~/.pub-cache
-            ~/.config/shorebird
-            ~/.shorebird
           key: ${{ runner.os }}-android-daymica-${{ hashFiles('apps/daymica/pubspec.lock', 'apps/daymica/android/build.gradle') }}
           restore-keys: |
             ${{ runner.os }}-android-daymica-
             ${{ runner.os }}-android-
-      - name: Install Shorebird
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -x "$HOME/.config/shorebird/bin/shorebird" ]; then
-            echo "$HOME/.config/shorebird/bin" >> "$GITHUB_PATH"
-          elif [ -x "$HOME/.shorebird/bin/shorebird" ]; then
-            echo "$HOME/.shorebird/bin" >> "$GITHUB_PATH"
-          else
-            curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/shorebirdtech/install/main/install.sh | bash
-            if [ -x "$HOME/.config/shorebird/bin/shorebird" ]; then
-              echo "$HOME/.config/shorebird/bin" >> "$GITHUB_PATH"
-            else
-              echo "$HOME/.shorebird/bin" >> "$GITHUB_PATH"
-            fi
-          fi
       - name: build
         env:
           APP_VERSION: ${{ needs.validate.outputs.daymica_version }}
           APP_BUILD: ${{ needs.validate.outputs.daymica_build }}
-          APP_MODE: ${{ needs.validate.outputs.mode }}
           ZYSICYJ_BACKEND_HOST: ${{ needs.validate.outputs.backend_url }}
-          SHOREBIRD_TOKEN: ${{ secrets.SHOREBIRD_TOKEN }}
           DAYMICA_RELEASE_TOKEN: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
           RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
           RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
@@ -196,9 +176,7 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:KEY_PASSWORD)) { throw 'KEY_PASSWORD secret missing' }
           if ([string]::IsNullOrWhiteSpace($env:STORE_PASSWORD)) { throw 'STORE_PASSWORD secret missing' }
           if ([string]::IsNullOrWhiteSpace($env:KEY_ALIAS)) { $env:KEY_ALIAS = 'daymica' }
-          $a = @{ Version = $env:APP_VERSION; BuildNumber = [int]$env:APP_BUILD }
-          if ($env:APP_MODE -eq 'patch') { $a['Patch'] = $true }
-          & ./scripts/build-daymica-android-prod.ps1 @a
+          & ./scripts/build-daymica-android-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   daymica-windows:
@@ -321,51 +299,29 @@ jobs:
           flutter-version: '3.41.6'
           channel: 'stable'
           cache: true
-      - name: Cache Gradle + pub + Shorebird
+      - name: Cache Gradle + pub
         uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
             ~/.pub-cache
-            ~/.config/shorebird
-            ~/.shorebird
           key: ${{ runner.os }}-android-yaoxiaobai-${{ hashFiles('apps/yaoxiaobai/yaoxiaobai_app/pubspec.lock') }}
           restore-keys: |
             ${{ runner.os }}-android-yaoxiaobai-
             ${{ runner.os }}-android-
-      - name: Install Shorebird
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -x "$HOME/.config/shorebird/bin/shorebird" ]; then
-            echo "$HOME/.config/shorebird/bin" >> "$GITHUB_PATH"
-          elif [ -x "$HOME/.shorebird/bin/shorebird" ]; then
-            echo "$HOME/.shorebird/bin" >> "$GITHUB_PATH"
-          else
-            curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/shorebirdtech/install/main/install.sh | bash
-            if [ -x "$HOME/.config/shorebird/bin/shorebird" ]; then
-              echo "$HOME/.config/shorebird/bin" >> "$GITHUB_PATH"
-            else
-              echo "$HOME/.shorebird/bin" >> "$GITHUB_PATH"
-            fi
-          fi
       - name: build
         env:
           APP_VERSION: ${{ needs.validate.outputs.yaoxiaobai_version }}
           APP_BUILD: ${{ needs.validate.outputs.yaoxiaobai_build }}
-          APP_MODE: ${{ needs.validate.outputs.mode }}
           ZYSICYJ_BACKEND_HOST: ${{ needs.validate.outputs.backend_url }}
-          SHOREBIRD_TOKEN: ${{ secrets.SHOREBIRD_TOKEN }}
           YAOXIAOBAI_RELEASE_TOKEN: ${{ secrets.YAOXIAOBAI_RELEASE_TOKEN }}
           RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
           RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
         run: |
           $ErrorActionPreference = 'Stop'
           if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
-          $a = @{ Version = $env:APP_VERSION; BuildNumber = [int]$env:APP_BUILD }
-          if ($env:APP_MODE -eq 'patch') { $a['Patch'] = $true }
-          & ./scripts/build-yaoxiaobai-android-prod.ps1 @a
+          & ./scripts/build-yaoxiaobai-android-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   footprint-android:
@@ -390,50 +346,28 @@ jobs:
           flutter-version: '3.41.6'
           channel: 'stable'
           cache: true
-      - name: Cache Gradle + pub + Shorebird
+      - name: Cache Gradle + pub
         uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
             ~/.pub-cache
-            ~/.config/shorebird
-            ~/.shorebird
           key: ${{ runner.os }}-android-footprint-${{ hashFiles('apps/footprint/pubspec.lock') }}
           restore-keys: |
             ${{ runner.os }}-android-footprint-
             ${{ runner.os }}-android-
-      - name: Install Shorebird
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -x "$HOME/.config/shorebird/bin/shorebird" ]; then
-            echo "$HOME/.config/shorebird/bin" >> "$GITHUB_PATH"
-          elif [ -x "$HOME/.shorebird/bin/shorebird" ]; then
-            echo "$HOME/.shorebird/bin" >> "$GITHUB_PATH"
-          else
-            curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/shorebirdtech/install/main/install.sh | bash
-            if [ -x "$HOME/.config/shorebird/bin/shorebird" ]; then
-              echo "$HOME/.config/shorebird/bin" >> "$GITHUB_PATH"
-            else
-              echo "$HOME/.shorebird/bin" >> "$GITHUB_PATH"
-            fi
-          fi
       - name: build
         env:
           APP_VERSION: ${{ needs.validate.outputs.footprint_version }}
           APP_BUILD: ${{ needs.validate.outputs.footprint_build }}
-          APP_MODE: ${{ needs.validate.outputs.mode }}
-          SHOREBIRD_TOKEN: ${{ secrets.SHOREBIRD_TOKEN }}
           DAYMICA_RELEASE_TOKEN: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
           RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
           RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
         run: |
           $ErrorActionPreference = 'Stop'
           if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
-          $a = @{ Version = $env:APP_VERSION; BuildNumber = [int]$env:APP_BUILD }
-          if ($env:APP_MODE -eq 'patch') { $a['Patch'] = $true }
-          & ./scripts/build-footprint-android-prod.ps1 @a
+          & ./scripts/build-footprint-android-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   aiusage-windows:

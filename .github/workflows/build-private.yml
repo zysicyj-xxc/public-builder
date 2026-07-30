@@ -25,7 +25,8 @@ jobs:
   # ---------------------------------------------------------------------------
   validate:
     name: validate-payload
-    runs-on: ubuntu-latest
+    # 自建 runner（Windows）：GitHub 托管 runner 受账户计费限制，发版链路改走 self-hosted。
+    runs-on: [self-hosted, Windows]
     timeout-minutes: 5
     outputs:
       ref: ${{ steps.v.outputs.ref }}
@@ -72,8 +73,8 @@ jobs:
             return , @($v, $b)
           }
 
-          # refs/tags/{app}/YYYYMMDDHHmm（热更已下线，不再接受 refs/heads/dev）
-          $ref = Assert-Match 'ref' $env:RAW_REF.Trim() '^refs/tags/(daymica|yaoxiaobai|footprint|backend|ai-usage|easy-shell|system-monitor|password-vault|clean-master|eye-care)/[0-9]{12}$'
+          # refs/tags/{app}/{年.季度.序号}-{buildNumber} 或历史 YYYYMMDDHHmm（热更已下线，不再接受 refs/heads/dev）
+          $ref = Assert-Match 'ref' $env:RAW_REF.Trim() '^refs/tags/(daymica|yaoxiaobai|footprint|backend|ai-usage|easy-shell|system-monitor|password-vault|clean-master|eye-care)/(?:[0-9]{12}|[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}-[0-9]+)$'
           $mode = Assert-Match 'mode' $env:RAW_MODE.Trim() '^release$'
 
           $allowedJobs = @(
@@ -252,7 +253,7 @@ jobs:
     name: backend
     needs: validate
     if: ${{ contains(needs.validate.outputs.jobs, ',backend,') }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Windows]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4

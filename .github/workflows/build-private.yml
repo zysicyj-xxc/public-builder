@@ -141,7 +141,7 @@ jobs:
           java-version: '17'
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.41.6'
+          flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
       - name: Cache Gradle + pub
@@ -195,7 +195,7 @@ jobs:
           persist-credentials: false
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.41.6'
+          flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
       - name: Cache pub + build
@@ -297,7 +297,7 @@ jobs:
           java-version: '17'
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.41.6'
+          flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
       - name: Cache Gradle + pub
@@ -344,7 +344,7 @@ jobs:
           java-version: '17'
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.41.6'
+          flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
       - name: Cache Gradle + pub
@@ -386,7 +386,7 @@ jobs:
           persist-credentials: false
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.41.6'
+          flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
       - name: Cache pub + build
@@ -433,7 +433,7 @@ jobs:
           java-version: '17'
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.41.6'
+          flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
       - name: Cache Gradle + pub
@@ -477,7 +477,7 @@ jobs:
           persist-credentials: false
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.41.6'
+          flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
       - name: Cache pub + build
@@ -520,7 +520,7 @@ jobs:
           persist-credentials: false
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.41.6'
+          flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
       - name: Cache pub + build
@@ -563,7 +563,7 @@ jobs:
           persist-credentials: false
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.41.6'
+          flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
       - name: Cache pub + build
@@ -606,7 +606,7 @@ jobs:
           persist-credentials: false
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.41.6'
+          flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
       - name: Cache pub + build
@@ -649,7 +649,7 @@ jobs:
           persist-credentials: false
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.41.6'
+          flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
       - name: Cache pub + build

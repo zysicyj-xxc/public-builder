@@ -701,3 +701,36 @@ jobs:
           if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
           & ./scripts/build-eyecare-windows-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  # ---------------------------------------------------------------------------
+  # Create GitHub Release on the private repo after all builds succeed.
+  # Artifacts live on RustFS; this release serves as version record + download index.
+  # ---------------------------------------------------------------------------
+  release:
+    name: create-github-release
+    needs: [validate, daymica-android, daymica-windows, daymica-web, backend, yaoxiaobai-android, footprint-android, aiusage-windows, aiusage-android, easyshell-windows, systemmonitor-windows, passwordvault-windows, cleanmaster-windows, eyecare-windows]
+    if: ${{ always() && needs.validate.result == 'success' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Create Release on private repo
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          REF: ${{ needs.validate.outputs.ref }}
+          JOBS: ${{ needs.validate.outputs.jobs }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Extract tag name: refs/tags/daymica/2026.3.5-1785160000 -> daymica/2026.3.5-1785160000
+          $tagName = $env:REF -replace '^refs/tags/', ''
+          $app = ($tagName -split '/')[0]
+          $ver = ($tagName -split '/', 2)[1] -replace '-[0-9]+$', ''
+          $jobsList = $env:JOBS.Trim(',')
+
+          # Build release notes (avoid here-string indentation issues)
+          $notes = "## $app v$ver`n`n**Tag:** ``$tagName```n**Built jobs:** $jobsList`n`nDownloads are hosted on RustFS (https://rustfs.zysicyj.top)."
+
+          # Create release via GitHub CLI
+          gh release create $tagName --repo zysicyj-xxc/zysicyj --title "$app v$ver" --notes $notes --latest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host "Created release: $tagName"

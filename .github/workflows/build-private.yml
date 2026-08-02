@@ -123,7 +123,7 @@ jobs:
           Out 'newapp_build' $nb
 
   daymica-android:
-    name: daymica-android
+    name: daymica-android-arm64
     needs: validate
     if: ${{ contains(needs.validate.outputs.jobs, ',daymica-android,') }}
     runs-on: ubuntu-latest
@@ -135,6 +135,7 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
           ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
+          fetch-depth: 1
       - uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
@@ -144,13 +145,15 @@ jobs:
           flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
-      - name: Cache Gradle + pub
+      - name: Cache Gradle + pub + dart_tool
         uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
             ~/.pub-cache
+            apps/daymica/.dart_tool
+            apps/shared_package/.dart_tool
           key: ${{ runner.os }}-android-daymica-${{ hashFiles('apps/daymica/pubspec.lock', 'apps/daymica/android/build.gradle') }}
           restore-keys: |
             ${{ runner.os }}-android-daymica-
@@ -193,16 +196,19 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
           ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
+          fetch-depth: 1
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
-      - name: Cache pub + build
+      - name: Cache pub + build + dart_tool
         uses: actions/cache@v4
         with:
           path: |
             ~/.pub-cache
+            apps/daymica/.dart_tool
+            apps/shared_package/.dart_tool
             apps/daymica/build
           key: ${{ runner.os }}-windows-daymica-${{ hashFiles('apps/daymica/pubspec.lock') }}
           restore-keys: |
@@ -236,6 +242,7 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
           ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
+          fetch-depth: 1
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: build+deploy
@@ -253,7 +260,8 @@ jobs:
     name: backend
     needs: validate
     if: ${{ contains(needs.validate.outputs.jobs, ',backend,') }}
-    runs-on: [self-hosted, Windows]
+    # GitHub 托管 runner（ubuntu-latest）：Go 交叉编译 + tar + RustFS + webhook，纯 pwsh 跨平台。
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -262,6 +270,7 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
           ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
+          fetch-depth: 1
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
@@ -279,7 +288,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   yaoxiaobai-android:
-    name: yaoxiaobai-android
+    name: yaoxiaobai-android-arm64
     needs: validate
     if: ${{ contains(needs.validate.outputs.jobs, ',yaoxiaobai-android,') }}
     runs-on: ubuntu-latest
@@ -291,6 +300,7 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
           ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
+          fetch-depth: 1
       - uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
@@ -300,13 +310,15 @@ jobs:
           flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
-      - name: Cache Gradle + pub
+      - name: Cache Gradle + pub + dart_tool
         uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
             ~/.pub-cache
+            apps/yaoxiaobai/yaoxiaobai_app/.dart_tool
+            apps/shared_package/.dart_tool
           key: ${{ runner.os }}-android-yaoxiaobai-${{ hashFiles('apps/yaoxiaobai/yaoxiaobai_app/pubspec.lock') }}
           restore-keys: |
             ${{ runner.os }}-android-yaoxiaobai-
@@ -326,7 +338,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   footprint-android:
-    name: footprint-android
+    name: footprint-android-arm64
     needs: validate
     if: ${{ contains(needs.validate.outputs.jobs, ',footprint-android,') }}
     runs-on: ubuntu-latest
@@ -338,6 +350,7 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
           ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
+          fetch-depth: 1
       - uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
@@ -347,13 +360,15 @@ jobs:
           flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
-      - name: Cache Gradle + pub
+      - name: Cache Gradle + pub + dart_tool
         uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
             ~/.pub-cache
+            apps/footprint/.dart_tool
+            apps/shared_package/.dart_tool
           key: ${{ runner.os }}-android-footprint-${{ hashFiles('apps/footprint/pubspec.lock') }}
           restore-keys: |
             ${{ runner.os }}-android-footprint-
@@ -384,16 +399,19 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
           ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
+          fetch-depth: 1
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
-      - name: Cache pub + build
+      - name: Cache pub + build + dart_tool
         uses: actions/cache@v4
         with:
           path: |
             ~/.pub-cache
+            apps/ai-usage/.dart_tool
+            apps/shared_package/.dart_tool
             apps/ai-usage/build
           key: ${{ runner.os }}-windows-aiusage-${{ hashFiles('apps/ai-usage/pubspec.lock') }}
           restore-keys: |
@@ -415,7 +433,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   aiusage-android:
-    name: aiusage-android
+    name: aiusage-android-arm64
     needs: validate
     if: ${{ contains(needs.validate.outputs.jobs, ',aiusage-android,') }}
     runs-on: ubuntu-latest
@@ -427,6 +445,7 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
           ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
+          fetch-depth: 1
       - uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
@@ -436,13 +455,15 @@ jobs:
           flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
-      - name: Cache Gradle + pub
+      - name: Cache Gradle + pub + dart_tool
         uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
             ~/.pub-cache
+            apps/ai-usage/.dart_tool
+            apps/shared_package/.dart_tool
           key: ${{ runner.os }}-android-aiusage-${{ hashFiles('apps/ai-usage/pubspec.lock') }}
           restore-keys: |
             ${{ runner.os }}-android-aiusage-
@@ -475,16 +496,19 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
           ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
+          fetch-depth: 1
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
-      - name: Cache pub + build
+      - name: Cache pub + build + dart_tool
         uses: actions/cache@v4
         with:
           path: |
             ~/.pub-cache
+            apps/easy-shell/.dart_tool
+            apps/shared_package/.dart_tool
             apps/easy-shell/build
           key: ${{ runner.os }}-windows-easyshell-${{ hashFiles('apps/easy-shell/pubspec.lock') }}
           restore-keys: |
@@ -518,16 +542,19 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
           ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
+          fetch-depth: 1
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
-      - name: Cache pub + build
+      - name: Cache pub + build + dart_tool
         uses: actions/cache@v4
         with:
           path: |
             ~/.pub-cache
+            apps/system-monitor/.dart_tool
+            apps/shared_package/.dart_tool
             apps/system-monitor/build
           key: ${{ runner.os }}-windows-systemmonitor-${{ hashFiles('apps/system-monitor/pubspec.lock') }}
           restore-keys: |
@@ -561,16 +588,19 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
           ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
+          fetch-depth: 1
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
-      - name: Cache pub + build
+      - name: Cache pub + build + dart_tool
         uses: actions/cache@v4
         with:
           path: |
             ~/.pub-cache
+            apps/password-vault/.dart_tool
+            apps/shared_package/.dart_tool
             apps/password-vault/build
           key: ${{ runner.os }}-windows-passwordvault-${{ hashFiles('apps/password-vault/pubspec.lock') }}
           restore-keys: |
@@ -604,16 +634,19 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
           ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
+          fetch-depth: 1
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
-      - name: Cache pub + build
+      - name: Cache pub + build + dart_tool
         uses: actions/cache@v4
         with:
           path: |
             ~/.pub-cache
+            apps/clean-master/.dart_tool
+            apps/shared_package/.dart_tool
             apps/clean-master/build
           key: ${{ runner.os }}-windows-cleanmaster-${{ hashFiles('apps/clean-master/pubspec.lock') }}
           restore-keys: |
@@ -647,16 +680,19 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
           ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
+          fetch-depth: 1
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
-      - name: Cache pub + build
+      - name: Cache pub + build + dart_tool
         uses: actions/cache@v4
         with:
           path: |
             ~/.pub-cache
+            apps/eye-care/.dart_tool
+            apps/shared_package/.dart_tool
             apps/eye-care/build
           key: ${{ runner.os }}-windows-eyecare-${{ hashFiles('apps/eye-care/pubspec.lock') }}
           restore-keys: |

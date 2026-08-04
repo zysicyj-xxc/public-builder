@@ -328,6 +328,9 @@ jobs:
           YAOXIAOBAI_RELEASE_TOKEN: ${{ secrets.YAOXIAOBAI_RELEASE_TOKEN }}
           RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
           RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+          # 固定 release 签名（防签名冲突导致用户卸载丢数据）
+          YAOXIAOBAI_ANDROID_KEYSTORE_BASE64: ${{ secrets.YAOXIAOBAI_ANDROID_KEYSTORE_BASE64 }}
+          YAOXIAOBAI_STORE_PASSWORD: ${{ secrets.YAOXIAOBAI_STORE_PASSWORD }}
         run: |
           $ErrorActionPreference = 'Stop'
           if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
@@ -376,6 +379,9 @@ jobs:
           DAYMICA_RELEASE_TOKEN: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
           RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
           RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+          # 固定 release 签名（防签名冲突导致用户卸载丢数据）
+          FP_KEYSTORE_B64: ${{ secrets.FP_KEYSTORE_B64 }}
+          FP_STORE_PASSWORD: ${{ secrets.FP_STORE_PASSWORD }}
         run: |
           $ErrorActionPreference = 'Stop'
           if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
@@ -471,6 +477,9 @@ jobs:
           RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
           DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
           DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+          # 固定 release 签名（防签名冲突导致用户卸载丢数据）
+          AIUSAGE_ANDROID_KEYSTORE_BASE64: ${{ secrets.AIUSAGE_ANDROID_KEYSTORE_BASE64 }}
+          AIUSAGE_STORE_PASSWORD: ${{ secrets.AIUSAGE_STORE_PASSWORD }}
         run: |
           $ErrorActionPreference = 'Stop'
           if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }

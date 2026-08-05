@@ -280,6 +280,7 @@ jobs:
           RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
           RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
           WEBHOOK_DEPLOY_KEY: ${{ secrets.WEBHOOK_DEPLOY_KEY }}
+          CONFIG_PROD_BASE64: ${{ secrets.CONFIG_PROD_BASE64 }}
         run: |
           $ErrorActionPreference = 'Stop'
           & ./scripts/deploy-backend-native-prod.ps1

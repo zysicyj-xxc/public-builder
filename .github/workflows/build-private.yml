@@ -81,7 +81,7 @@ jobs:
             'daymica-android', 'daymica-windows', 'daymica-web',
             'yaoxiaobai-android', 'footprint-android', 'backend',
             'aiusage-windows', 'aiusage-android', 'easyshell-windows',
-            'systemmonitor-windows', 'passwordvault-windows',
+            'systemmonitor-windows', 'passwordvault-windows', 'passwordvault-android',
             'cleanmaster-windows', 'eyecare-windows'
           )
           $jobs = @()
@@ -486,6 +486,59 @@ jobs:
           & ./scripts/build-aiusage-android-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+  passwordvault-android:
+    name: passwordvault-android-arm64
+    needs: validate
+    if: ${{ contains(needs.validate.outputs.jobs, ',passwordvault-android,') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.validate.outputs.ref }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.8'
+          channel: 'stable'
+          cache: true
+      - name: Cache Gradle + dart_tool
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            apps/password-vault/.dart_tool
+            apps/shared_package/.dart_tool
+          key: ${{ runner.os }}-android-passwordvault-${{ hashFiles('apps/password-vault/pubspec.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-android-passwordvault-
+            ${{ runner.os }}-android-
+      - name: build
+        env:
+          APP_VERSION: ${{ needs.validate.outputs.newapp_version }}
+          APP_BUILD: ${{ needs.validate.outputs.newapp_build }}
+          DAYMICA_RELEASE_TOKEN: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
+          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+          DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+          # 固定 release 签名（防签名冲突导致用户卸载丢数据）
+          PASSWORDVAULT_ANDROID_KEYSTORE_BASE64: ${{ secrets.PASSWORDVAULT_ANDROID_KEYSTORE_BASE64 }}
+          PASSWORDVAULT_STORE_PASSWORD: ${{ secrets.PASSWORDVAULT_STORE_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
+          & ./scripts/build-passwordvault-android-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
   easyshell-windows:
     name: easyshell-windows
     needs: validate
@@ -717,7 +770,7 @@ jobs:
   # ---------------------------------------------------------------------------
   release:
     name: create-github-release
-    needs: [validate, daymica-android, daymica-windows, daymica-web, backend, yaoxiaobai-android, footprint-android, aiusage-windows, aiusage-android, easyshell-windows, systemmonitor-windows, passwordvault-windows, cleanmaster-windows, eyecare-windows]
+    needs: [validate, daymica-android, daymica-windows, daymica-web, backend, yaoxiaobai-android, footprint-android, aiusage-windows, aiusage-android, easyshell-windows, systemmonitor-windows, passwordvault-windows, passwordvault-android, cleanmaster-windows, eyecare-windows]
     if: ${{ always() && needs.validate.result == 'success' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5

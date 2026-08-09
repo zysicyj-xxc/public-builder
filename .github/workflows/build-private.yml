@@ -1,18 +1,19 @@
-# Public builder: burn free public GHA minutes while cloning private source via PAT.
+# Backend + web builds only (non-platform jobs).
+# Android -> build-private-android.yml; Windows -> build-private-windows.yml.
+# 三者独立 concurrency + 独立 release，互不影响。
 # Trust boundary: only repository_dispatch; treat client_payload as untrusted.
 
-name: Public Builder for Private Repo
+name: Public Builder Backend & Web
 
 on:
   repository_dispatch:
     types: [trigger-build]
 
-# Least privilege for the GITHUB_TOKEN of this public repo (secrets still available).
 permissions:
   contents: read
 
 concurrency:
-  group: pb-${{ github.event.client_payload.mode }}-${{ github.event.client_payload.ref }}
+  group: pb-bw-${{ github.event.client_payload.mode }}-${{ github.event.client_payload.ref }}
   cancel-in-progress: false
 
 defaults:
@@ -20,12 +21,8 @@ defaults:
     shell: pwsh
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Validate & sanitize dispatch payload before any secret-bearing job runs.
-  # ---------------------------------------------------------------------------
   validate:
     name: validate-payload
-    # 纯 PowerShell 字符串校验，无平台依赖；改用 GitHub 托管 runner，避免依赖本地 self-hosted（曾因离线卡死发布）
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -63,7 +60,6 @@ jobs:
             if ($value -notmatch $pattern) { throw "$name failed allowlist: '$value'" }
             return $value
           }
-          # Split combined "version+build" (repository_dispatch caps client_payload at 10 props).
           function Split-VerBuild([string]$name, [string]$value, [string]$vre, [string]$bre) {
             $t = if ($null -eq $value) { '' } else { $value.Trim() }
             if ([string]::IsNullOrWhiteSpace($t)) { return , @('0', '0') }
@@ -73,39 +69,36 @@ jobs:
             return , @($v, $b)
           }
 
-          # refs/tags/{app}/{年.季度.序号}-{buildNumber} 或历史 YYYYMMDDHHmm（热更已下线，不再接受 refs/heads/dev）
           $ref = Assert-Match 'ref' $env:RAW_REF.Trim() '^refs/tags/(daymica|yaoxiaobai|footprint|backend|ai-usage|easy-shell|system-monitor|password-vault|clean-master|eye-care)/(?:[0-9]{12}|[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}-[0-9]+)$'
           $mode = Assert-Match 'mode' $env:RAW_MODE.Trim() '^release$'
 
           $allowedJobs = @(
-            'daymica-android', 'daymica-windows', 'daymica-web',
-            'yaoxiaobai-android', 'footprint-android', 'backend',
-            'aiusage-windows', 'aiusage-android', 'easyshell-windows',
-            'systemmonitor-windows', 'passwordvault-windows', 'passwordvault-android',
-            'cleanmaster-windows', 'eyecare-windows'
+            'daymica-web', 'backend'
           )
           $jobs = @()
           foreach ($j in ($env:RAW_JOBS -split ',')) {
             $t = $j.Trim()
             if (-not $t) { continue }
-            if ($t -notin $allowedJobs) { throw "job not allowed: '$t'" }
+            if ($t -notin $allowedJobs) { continue }
             if ($t -notin $jobs) { $jobs += $t }
           }
-          if ($jobs.Count -eq 0) { throw 'jobs is empty after allowlist filter' }
+          if ($jobs.Count -eq 0) {
+            Write-Host 'No backend/web jobs in payload; skip'
+            Out 'ref' $ref
+            Out 'mode' $mode
+            Out 'jobs' ''
+            exit 0
+          }
 
-          # Version: digits / dots / underscore / hyphen (tag-style YYYYMMDDHHmm ok)
           $verRe = '^[A-Za-z0-9._-]{1,64}$'
           $buildRe = '^[0-9]{1,16}$'
 
-          # Combined "version+build" fields (payload prop cap = 10). daymica/yaoxiaobai/footprint
-          # always sent from pubspec; newapp is '0+0' unless a new-app tag was pushed.
           $d = Split-VerBuild 'daymica' $env:RAW_DAYMICA $verRe $buildRe; $dv = $d[0]; $db = $d[1]
           $y = Split-VerBuild 'yaoxiaobai' $env:RAW_YAOXIAOBAI $verRe $buildRe; $yv = $y[0]; $yb = $y[1]
           $f = Split-VerBuild 'footprint' $env:RAW_FOOTPRINT $verRe $buildRe; $fv = $f[0]; $fb = $f[1]
           $n = Split-VerBuild 'newapp' $env:RAW_NEWAPP $verRe $buildRe; $nv = $n[0]; $nb = $n[1]
           $backendUrl = Assert-Match 'backend_url' $env:RAW_BACKEND_URL.Trim() '^https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?(?:/[^\s]*)?$'
 
-          # Canonical jobs string wrapped for safe contains() checks
           $jobsCsv = ',' + ($jobs -join ',') + ','
 
           Write-Host "OK ref=$ref mode=$mode jobs=$($jobs -join ',')"
@@ -121,111 +114,6 @@ jobs:
           Out 'backend_url' $backendUrl
           Out 'newapp_version' $nv
           Out 'newapp_build' $nb
-
-  daymica-android:
-    name: daymica-android-arm64
-    needs: validate
-    if: ${{ contains(needs.validate.outputs.jobs, ',daymica-android,') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: zysicyj-xxc/zysicyj
-          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          ref: ${{ needs.validate.outputs.ref }}
-          persist-credentials: false
-          fetch-depth: 1
-      - uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.44.8'
-          channel: 'stable'
-          cache: true
-      - name: Cache Gradle + dart_tool
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-            apps/daymica/.dart_tool
-            apps/shared_package/.dart_tool
-          key: ${{ runner.os }}-android-daymica-${{ hashFiles('apps/daymica/pubspec.lock', 'apps/daymica/android/build.gradle') }}
-          restore-keys: |
-            ${{ runner.os }}-android-daymica-
-            ${{ runner.os }}-android-
-      - name: build
-        env:
-          APP_VERSION: ${{ needs.validate.outputs.daymica_version }}
-          APP_BUILD: ${{ needs.validate.outputs.daymica_build }}
-          ZYSICYJ_BACKEND_HOST: ${{ needs.validate.outputs.backend_url }}
-          DAYMICA_RELEASE_TOKEN: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
-          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
-          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
-          DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
-          DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
-          # Release signing (same keystore as historical CNB builds)
-          DAYMICA_ANDROID_KEYSTORE_BASE64: ${{ secrets.DAYMICA_ANDROID_KEYSTORE_BASE64 }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
-          if ([string]::IsNullOrWhiteSpace($env:DAYMICA_ANDROID_KEYSTORE_BASE64)) { throw 'DAYMICA_ANDROID_KEYSTORE_BASE64 secret missing' }
-          if ([string]::IsNullOrWhiteSpace($env:KEY_PASSWORD)) { throw 'KEY_PASSWORD secret missing' }
-          if ([string]::IsNullOrWhiteSpace($env:STORE_PASSWORD)) { throw 'STORE_PASSWORD secret missing' }
-          if ([string]::IsNullOrWhiteSpace($env:KEY_ALIAS)) { $env:KEY_ALIAS = 'daymica' }
-          & ./scripts/build-daymica-android-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-  daymica-windows:
-    name: daymica-windows
-    needs: validate
-    if: ${{ contains(needs.validate.outputs.jobs, ',daymica-windows,') }}
-    runs-on: windows-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: zysicyj-xxc/zysicyj
-          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          ref: ${{ needs.validate.outputs.ref }}
-          persist-credentials: false
-          fetch-depth: 1
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.44.8'
-          channel: 'stable'
-          cache: true
-      - name: Cache build + dart_tool
-        uses: actions/cache@v4
-        with:
-          path: |
-            apps/daymica/.dart_tool
-            apps/shared_package/.dart_tool
-            apps/daymica/build
-          key: ${{ runner.os }}-windows-daymica-${{ hashFiles('apps/daymica/pubspec.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-windows-daymica-
-            ${{ runner.os }}-windows-
-      - name: build
-        env:
-          APP_VERSION: ${{ needs.validate.outputs.daymica_version }}
-          APP_BUILD: ${{ needs.validate.outputs.daymica_build }}
-          DAYMICA_RELEASE_TOKEN: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
-          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
-          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
-          DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
-          DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
-          & ./scripts/build-flutter-windows-prod.ps1 -AppSlug daymica -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   daymica-web:
     name: daymica-web
@@ -258,7 +146,6 @@ jobs:
     name: backend
     needs: validate
     if: ${{ contains(needs.validate.outputs.jobs, ',backend,') }}
-    # GitHub 托管 runner（ubuntu-latest）：Go 交叉编译 + tar + RustFS + webhook，纯 pwsh 跨平台。
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -286,493 +173,14 @@ jobs:
           & ./scripts/deploy-backend-native-prod.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-  yaoxiaobai-android:
-    name: yaoxiaobai-android-arm64
-    needs: validate
-    if: ${{ contains(needs.validate.outputs.jobs, ',yaoxiaobai-android,') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: zysicyj-xxc/zysicyj
-          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          ref: ${{ needs.validate.outputs.ref }}
-          persist-credentials: false
-          fetch-depth: 1
-      - uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.44.8'
-          channel: 'stable'
-          cache: true
-      - name: Cache Gradle + dart_tool
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-            apps/yaoxiaobai/yaoxiaobai_app/.dart_tool
-            apps/shared_package/.dart_tool
-          key: ${{ runner.os }}-android-yaoxiaobai-${{ hashFiles('apps/yaoxiaobai/yaoxiaobai_app/pubspec.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-android-yaoxiaobai-
-            ${{ runner.os }}-android-
-      - name: build
-        env:
-          APP_VERSION: ${{ needs.validate.outputs.yaoxiaobai_version }}
-          APP_BUILD: ${{ needs.validate.outputs.yaoxiaobai_build }}
-          ZYSICYJ_BACKEND_HOST: ${{ needs.validate.outputs.backend_url }}
-          YAOXIAOBAI_RELEASE_TOKEN: ${{ secrets.YAOXIAOBAI_RELEASE_TOKEN }}
-          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
-          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
-          # 固定 release 签名（防签名冲突导致用户卸载丢数据）
-          YAOXIAOBAI_ANDROID_KEYSTORE_BASE64: ${{ secrets.YAOXIAOBAI_ANDROID_KEYSTORE_BASE64 }}
-          YAOXIAOBAI_STORE_PASSWORD: ${{ secrets.YAOXIAOBAI_STORE_PASSWORD }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
-          & ./scripts/build-yaoxiaobai-android-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-  footprint-android:
-    name: footprint-android-arm64
-    needs: validate
-    if: ${{ contains(needs.validate.outputs.jobs, ',footprint-android,') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: zysicyj-xxc/zysicyj
-          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          ref: ${{ needs.validate.outputs.ref }}
-          persist-credentials: false
-          fetch-depth: 1
-      - uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.44.8'
-          channel: 'stable'
-          cache: true
-      - name: Cache Gradle + dart_tool
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-            apps/footprint/.dart_tool
-            apps/shared_package/.dart_tool
-          key: ${{ runner.os }}-android-footprint-${{ hashFiles('apps/footprint/pubspec.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-android-footprint-
-            ${{ runner.os }}-android-
-      - name: build
-        env:
-          APP_VERSION: ${{ needs.validate.outputs.footprint_version }}
-          APP_BUILD: ${{ needs.validate.outputs.footprint_build }}
-          DAYMICA_RELEASE_TOKEN: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
-          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
-          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
-          # 固定 release 签名（防签名冲突导致用户卸载丢数据）
-          FP_KEYSTORE_B64: ${{ secrets.FP_KEYSTORE_B64 }}
-          FP_STORE_PASSWORD: ${{ secrets.FP_STORE_PASSWORD }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
-          & ./scripts/build-footprint-android-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-  aiusage-windows:
-    name: aiusage-windows
-    needs: validate
-    if: ${{ contains(needs.validate.outputs.jobs, ',aiusage-windows,') }}
-    runs-on: windows-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: zysicyj-xxc/zysicyj
-          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          ref: ${{ needs.validate.outputs.ref }}
-          persist-credentials: false
-          fetch-depth: 1
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.44.8'
-          channel: 'stable'
-          cache: true
-      - name: Cache build + dart_tool
-        uses: actions/cache@v4
-        with:
-          path: |
-            apps/ai-usage/.dart_tool
-            apps/shared_package/.dart_tool
-            apps/ai-usage/build
-          key: ${{ runner.os }}-windows-aiusage-${{ hashFiles('apps/ai-usage/pubspec.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-windows-aiusage-
-            ${{ runner.os }}-windows-
-      - name: build
-        env:
-          APP_VERSION: ${{ needs.validate.outputs.newapp_version }}
-          APP_BUILD: ${{ needs.validate.outputs.newapp_build }}
-          DAYMICA_RELEASE_TOKEN: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
-          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
-          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
-          DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
-          DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
-          & ./scripts/build-aiusage-windows-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-  aiusage-android:
-    name: aiusage-android-arm64
-    needs: validate
-    if: ${{ contains(needs.validate.outputs.jobs, ',aiusage-android,') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: zysicyj-xxc/zysicyj
-          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          ref: ${{ needs.validate.outputs.ref }}
-          persist-credentials: false
-          fetch-depth: 1
-      - uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.44.8'
-          channel: 'stable'
-          cache: true
-      - name: Cache Gradle + dart_tool
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-            apps/ai-usage/.dart_tool
-            apps/shared_package/.dart_tool
-          key: ${{ runner.os }}-android-aiusage-${{ hashFiles('apps/ai-usage/pubspec.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-android-aiusage-
-            ${{ runner.os }}-android-
-      - name: build
-        env:
-          APP_VERSION: ${{ needs.validate.outputs.newapp_version }}
-          APP_BUILD: ${{ needs.validate.outputs.newapp_build }}
-          DAYMICA_RELEASE_TOKEN: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
-          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
-          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
-          DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
-          DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
-          # 固定 release 签名（防签名冲突导致用户卸载丢数据）
-          AIUSAGE_ANDROID_KEYSTORE_BASE64: ${{ secrets.AIUSAGE_ANDROID_KEYSTORE_BASE64 }}
-          AIUSAGE_STORE_PASSWORD: ${{ secrets.AIUSAGE_STORE_PASSWORD }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
-          & ./scripts/build-aiusage-android-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-  passwordvault-android:
-    name: passwordvault-android-arm64
-    needs: validate
-    if: ${{ contains(needs.validate.outputs.jobs, ',passwordvault-android,') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: zysicyj-xxc/zysicyj
-          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          ref: ${{ needs.validate.outputs.ref }}
-          persist-credentials: false
-          fetch-depth: 1
-      - uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.44.8'
-          channel: 'stable'
-          cache: true
-      - name: Cache Gradle + dart_tool
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-            apps/password-vault/.dart_tool
-            apps/shared_package/.dart_tool
-          key: ${{ runner.os }}-android-passwordvault-${{ hashFiles('apps/password-vault/pubspec.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-android-passwordvault-
-            ${{ runner.os }}-android-
-      - name: build
-        env:
-          APP_VERSION: ${{ needs.validate.outputs.newapp_version }}
-          APP_BUILD: ${{ needs.validate.outputs.newapp_build }}
-          DAYMICA_RELEASE_TOKEN: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
-          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
-          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
-          DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
-          DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
-          # 固定 release 签名（防签名冲突导致用户卸载丢数据）
-          PASSWORDVAULT_ANDROID_KEYSTORE_BASE64: ${{ secrets.PASSWORDVAULT_ANDROID_KEYSTORE_BASE64 }}
-          PASSWORDVAULT_STORE_PASSWORD: ${{ secrets.PASSWORDVAULT_STORE_PASSWORD }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
-          & ./scripts/build-passwordvault-android-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-  easyshell-windows:
-    name: easyshell-windows
-    needs: validate
-    if: ${{ contains(needs.validate.outputs.jobs, ',easyshell-windows,') }}
-    runs-on: windows-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: zysicyj-xxc/zysicyj
-          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          ref: ${{ needs.validate.outputs.ref }}
-          persist-credentials: false
-          fetch-depth: 1
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.44.8'
-          channel: 'stable'
-          cache: true
-      - name: Cache build + dart_tool
-        uses: actions/cache@v4
-        with:
-          path: |
-            apps/easy-shell/.dart_tool
-            apps/shared_package/.dart_tool
-            apps/easy-shell/build
-          key: ${{ runner.os }}-windows-easyshell-${{ hashFiles('apps/easy-shell/pubspec.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-windows-easyshell-
-            ${{ runner.os }}-windows-
-      - name: build
-        env:
-          APP_VERSION: ${{ needs.validate.outputs.newapp_version }}
-          APP_BUILD: ${{ needs.validate.outputs.newapp_build }}
-          DAYMICA_RELEASE_TOKEN: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
-          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
-          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
-          DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
-          DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
-          & ./scripts/build-easyshell-windows-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-  systemmonitor-windows:
-    name: systemmonitor-windows
-    needs: validate
-    if: ${{ contains(needs.validate.outputs.jobs, ',systemmonitor-windows,') }}
-    runs-on: windows-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: zysicyj-xxc/zysicyj
-          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          ref: ${{ needs.validate.outputs.ref }}
-          persist-credentials: false
-          fetch-depth: 1
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.44.8'
-          channel: 'stable'
-          cache: true
-      - name: Cache build + dart_tool
-        uses: actions/cache@v4
-        with:
-          path: |
-            apps/system-monitor/.dart_tool
-            apps/shared_package/.dart_tool
-            apps/system-monitor/build
-          key: ${{ runner.os }}-windows-systemmonitor-${{ hashFiles('apps/system-monitor/pubspec.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-windows-systemmonitor-
-            ${{ runner.os }}-windows-
-      - name: build
-        env:
-          APP_VERSION: ${{ needs.validate.outputs.newapp_version }}
-          APP_BUILD: ${{ needs.validate.outputs.newapp_build }}
-          DAYMICA_RELEASE_TOKEN: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
-          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
-          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
-          DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
-          DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
-          & ./scripts/build-systemmonitor-windows-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-  passwordvault-windows:
-    name: passwordvault-windows
-    needs: validate
-    if: ${{ contains(needs.validate.outputs.jobs, ',passwordvault-windows,') }}
-    runs-on: windows-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: zysicyj-xxc/zysicyj
-          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          ref: ${{ needs.validate.outputs.ref }}
-          persist-credentials: false
-          fetch-depth: 1
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.44.8'
-          channel: 'stable'
-          cache: true
-      - name: Cache build + dart_tool
-        uses: actions/cache@v4
-        with:
-          path: |
-            apps/password-vault/.dart_tool
-            apps/shared_package/.dart_tool
-            apps/password-vault/build
-          key: ${{ runner.os }}-windows-passwordvault-${{ hashFiles('apps/password-vault/pubspec.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-windows-passwordvault-
-            ${{ runner.os }}-windows-
-      - name: build
-        env:
-          APP_VERSION: ${{ needs.validate.outputs.newapp_version }}
-          APP_BUILD: ${{ needs.validate.outputs.newapp_build }}
-          DAYMICA_RELEASE_TOKEN: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
-          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
-          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
-          DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
-          DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
-          & ./scripts/build-passwordvault-windows-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-  cleanmaster-windows:
-    name: cleanmaster-windows
-    needs: validate
-    if: ${{ contains(needs.validate.outputs.jobs, ',cleanmaster-windows,') }}
-    runs-on: windows-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: zysicyj-xxc/zysicyj
-          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          ref: ${{ needs.validate.outputs.ref }}
-          persist-credentials: false
-          fetch-depth: 1
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.44.8'
-          channel: 'stable'
-          cache: true
-      - name: Cache build + dart_tool
-        uses: actions/cache@v4
-        with:
-          path: |
-            apps/clean-master/.dart_tool
-            apps/shared_package/.dart_tool
-            apps/clean-master/build
-          key: ${{ runner.os }}-windows-cleanmaster-${{ hashFiles('apps/clean-master/pubspec.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-windows-cleanmaster-
-            ${{ runner.os }}-windows-
-      - name: build
-        env:
-          APP_VERSION: ${{ needs.validate.outputs.newapp_version }}
-          APP_BUILD: ${{ needs.validate.outputs.newapp_build }}
-          DAYMICA_RELEASE_TOKEN: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
-          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
-          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
-          DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
-          DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
-          & ./scripts/build-cleanmaster-windows-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-  eyecare-windows:
-    name: eyecare-windows
-    needs: validate
-    if: ${{ contains(needs.validate.outputs.jobs, ',eyecare-windows,') }}
-    runs-on: windows-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: zysicyj-xxc/zysicyj
-          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          ref: ${{ needs.validate.outputs.ref }}
-          persist-credentials: false
-          fetch-depth: 1
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.44.8'
-          channel: 'stable'
-          cache: true
-      - name: Cache build + dart_tool
-        uses: actions/cache@v4
-        with:
-          path: |
-            apps/eye-care/.dart_tool
-            apps/shared_package/.dart_tool
-            apps/eye-care/build
-          key: ${{ runner.os }}-windows-eyecare-${{ hashFiles('apps/eye-care/pubspec.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-windows-eyecare-
-            ${{ runner.os }}-windows-
-      - name: build
-        env:
-          APP_VERSION: ${{ needs.validate.outputs.newapp_version }}
-          APP_BUILD: ${{ needs.validate.outputs.newapp_build }}
-          DAYMICA_RELEASE_TOKEN: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
-          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
-          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
-          DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
-          DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
-          & ./scripts/build-eyecare-windows-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
   # ---------------------------------------------------------------------------
-  # Create GitHub Release on the private repo after all builds succeed.
+  # Create GitHub Release after backend/web builds succeed (idempotent).
   # Artifacts live on RustFS; this release serves as version record + download index.
   # ---------------------------------------------------------------------------
   release:
     name: create-github-release
-    needs: [validate, daymica-android, daymica-windows, daymica-web, backend, yaoxiaobai-android, footprint-android, aiusage-windows, aiusage-android, easyshell-windows, systemmonitor-windows, passwordvault-windows, passwordvault-android, cleanmaster-windows, eyecare-windows]
-    if: ${{ always() && needs.validate.result == 'success' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+    needs: [validate, daymica-web, backend]
+    if: ${{ always() && needs.validate.result == 'success' && needs.validate.outputs.jobs != '' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -784,16 +192,19 @@ jobs:
           JOBS: ${{ needs.validate.outputs.jobs }}
         run: |
           $ErrorActionPreference = 'Stop'
-          # Extract tag name: refs/tags/daymica/2026.3.5-1785160000 -> daymica/2026.3.5-1785160000
           $tagName = $env:REF -replace '^refs/tags/', ''
           $app = ($tagName -split '/')[0]
           $ver = ($tagName -split '/', 2)[1] -replace '-[0-9]+$', ''
           $jobsList = $env:JOBS.Trim(',')
 
-          # Build release notes (avoid here-string indentation issues)
           $notes = "## $app v$ver`n`n**Tag:** ``$tagName```n**Built jobs:** $jobsList`n`nDownloads are hosted on RustFS (https://rustfs.zysicyj.top)."
 
-          # Create release via GitHub CLI
-          gh release create $tagName --repo zysicyj-xxc/zysicyj --title "$app v$ver" --notes $notes --latest
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Write-Host "Created release: $tagName"
+          # 幂等：同 tag 可能被 sibling workflow 并发创建，已存在则跳过
+          $existing = gh release view $tagName --repo zysicyj-xxc/zysicyj 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tagName --repo zysicyj-xxc/zysicyj --title "$app v$ver" --notes $notes --latest
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Write-Host "Created release: $tagName"
+          } else {
+            Write-Host "Release already exists (created by sibling workflow): $tagName"
+          }

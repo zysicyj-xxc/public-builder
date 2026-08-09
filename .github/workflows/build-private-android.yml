@@ -408,14 +408,27 @@ jobs:
           $ver = ($tagName -split '/', 2)[1] -replace '-[0-9]+$', ''
           $jobsList = $env:JOBS.Trim(',')
 
-          $notes = "## $app v$ver`n`n**Tag:** ``$tagName```n**Built jobs:** $jobsList`n`nDownloads are hosted on RustFS (https://rustfs.zysicyj.top)."
-
-          # 幂等：同 tag 可能被 android/windows 两个 workflow 并发创建，已存在则跳过
+          # 幂等 + 合并：同 tag 可能被 android/windows 两个 workflow 并发创建。
+          # 已存在时读取现有 notes，把本 workflow 的 jobs 合并进去（去重）后更新，
+          # 保证最终 release notes 包含全部平台（如 windows 先创建、android 后合并）。
           $existing = gh release view $tagName --repo zysicyj-xxc/zysicyj 2>$null
           if ($LASTEXITCODE -ne 0) {
+            $notes = "## $app v$ver`n`n**Tag:** ``$tagName```n**Built jobs:** $jobsList`n`nDownloads are hosted on RustFS (https://rustfs.zysicyj.top)."
             gh release create $tagName --repo zysicyj-xxc/zysicyj --title "$app v$ver" --notes $notes --latest
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             Write-Host "Created release: $tagName"
           } else {
-            Write-Host "Release already exists (created by sibling workflow): $tagName"
+            $oldNotes = $existing.body
+            $jobsLine = ($oldNotes -split "`n" | Where-Object { $_ -match '^\*\*Built jobs:\*\*' } | Select-Object -First 1)
+            if ($jobsLine) {
+              $oldJobs = @(($jobsLine -replace '^\*\*Built jobs:\*\*\s*', '') -split ', ' | Where-Object { $_ })
+              $myJobs = @($jobsList -split ', ' | Where-Object { $_ })
+              $merged = @($oldJobs + $myJobs | Select-Object -Unique) -join ', '
+              $newNotes = $oldNotes -replace [regex]::Escape($jobsLine), "**Built jobs:** $merged"
+            } else {
+              $newNotes = $oldNotes + "`n`n**Built jobs:** $jobsList"
+            }
+            gh release edit $tagName --repo zysicyj-xxc/zysicyj --notes $newNotes
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Write-Host "Merged jobs into existing release: $tagName"
           }

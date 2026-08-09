@@ -134,18 +134,8 @@ jobs:
           flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
-      # Windows 上 subosito/flutter-action 的 cache: true 经常不生效（SDK 装到 hostedtoolcache，
-      # pub-cache 在用户目录），显式缓存这两处，避免每次 130s 重装 Flutter
-      - name: Cache Flutter SDK + pub cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            C:\hostedtoolcache\windows\flutter
-            ~\AppData\Local\Pub\Cache
-          key: ${{ runner.os }}-flutter-3.44.8-${{ hashFiles('apps/daymica/pubspec.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-flutter-3.44.8-
-            ${{ runner.os }}-flutter-
+      # Flutter SDK + pub cache 由 subosito/flutter-action 的 cache: true 覆盖（实测命中），
+      # 不再显式重复缓存（避免与 subosito 缓存重复占用 10GB 仓库配额）。
       - name: Cache build + dart_tool
         uses: actions/cache@v4
         with:
@@ -191,16 +181,6 @@ jobs:
           flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
-      - name: Cache Flutter SDK + pub cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            C:\hostedtoolcache\windows\flutter
-            ~\AppData\Local\Pub\Cache
-          key: ${{ runner.os }}-flutter-3.44.8-${{ hashFiles('apps/ai-usage/pubspec.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-flutter-3.44.8-
-            ${{ runner.os }}-flutter-
       - name: Cache build + dart_tool
         uses: actions/cache@v4
         with:
@@ -246,16 +226,6 @@ jobs:
           flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
-      - name: Cache Flutter SDK + pub cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            C:\hostedtoolcache\windows\flutter
-            ~\AppData\Local\Pub\Cache
-          key: ${{ runner.os }}-flutter-3.44.8-${{ hashFiles('apps/easy-shell/pubspec.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-flutter-3.44.8-
-            ${{ runner.os }}-flutter-
       - name: Cache build + dart_tool
         uses: actions/cache@v4
         with:
@@ -301,16 +271,6 @@ jobs:
           flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
-      - name: Cache Flutter SDK + pub cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            C:\hostedtoolcache\windows\flutter
-            ~\AppData\Local\Pub\Cache
-          key: ${{ runner.os }}-flutter-3.44.8-${{ hashFiles('apps/system-monitor/pubspec.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-flutter-3.44.8-
-            ${{ runner.os }}-flutter-
       - name: Cache build + dart_tool
         uses: actions/cache@v4
         with:
@@ -356,16 +316,6 @@ jobs:
           flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
-      - name: Cache Flutter SDK + pub cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            C:\hostedtoolcache\windows\flutter
-            ~\AppData\Local\Pub\Cache
-          key: ${{ runner.os }}-flutter-3.44.8-${{ hashFiles('apps/password-vault/pubspec.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-flutter-3.44.8-
-            ${{ runner.os }}-flutter-
       - name: Cache build + dart_tool
         uses: actions/cache@v4
         with:
@@ -411,16 +361,6 @@ jobs:
           flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
-      - name: Cache Flutter SDK + pub cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            C:\hostedtoolcache\windows\flutter
-            ~\AppData\Local\Pub\Cache
-          key: ${{ runner.os }}-flutter-3.44.8-${{ hashFiles('apps/clean-master/pubspec.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-flutter-3.44.8-
-            ${{ runner.os }}-flutter-
       - name: Cache build + dart_tool
         uses: actions/cache@v4
         with:
@@ -466,16 +406,6 @@ jobs:
           flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
-      - name: Cache Flutter SDK + pub cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            C:\hostedtoolcache\windows\flutter
-            ~\AppData\Local\Pub\Cache
-          key: ${{ runner.os }}-flutter-3.44.8-${{ hashFiles('apps/eye-care/pubspec.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-flutter-3.44.8-
-            ${{ runner.os }}-flutter-
       - name: Cache build + dart_tool
         uses: actions/cache@v4
         with:

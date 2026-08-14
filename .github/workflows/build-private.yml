@@ -69,7 +69,7 @@ jobs:
             return , @($v, $b)
           }
 
-          $ref = Assert-Match 'ref' $env:RAW_REF.Trim() '^refs/tags/(daymica|yaoxiaobai|footprint|backend|ai-usage|easy-shell|system-monitor|password-vault|clean-master|eye-care)/(?:[0-9]{12}|[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}-[0-9]+)$'
+          $ref = Assert-Match 'ref' $env:RAW_REF.Trim() '^refs/tags/(daymica|yaoxiaobai|footprint|backend|ai-usage|easy-shell|system-monitor|password-vault|clean-master|eye-care|issue-board)/(?:[0-9]{12}|[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}-[0-9]+)$'
           $mode = Assert-Match 'mode' $env:RAW_MODE.Trim() '^release$'
 
           $allowedJobs = @(

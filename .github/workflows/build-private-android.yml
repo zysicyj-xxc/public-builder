@@ -68,12 +68,12 @@ jobs:
             return , @($v, $b)
           }
 
-          $ref = Assert-Match 'ref' $env:RAW_REF.Trim() '^refs/tags/(daymica|yaoxiaobai|footprint|backend|ai-usage|easy-shell|system-monitor|password-vault|clean-master|eye-care)/(?:[0-9]{12}|[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}-[0-9]+)$'
+          $ref = Assert-Match 'ref' $env:RAW_REF.Trim() '^refs/tags/(daymica|yaoxiaobai|footprint|backend|ai-usage|easy-shell|system-monitor|password-vault|clean-master|eye-care|issue-board)/(?:[0-9]{12}|[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}-[0-9]+)$'
           $mode = Assert-Match 'mode' $env:RAW_MODE.Trim() '^release$'
 
           $allowedJobs = @(
             'daymica-android', 'yaoxiaobai-android', 'footprint-android',
-            'aiusage-android', 'passwordvault-android'
+            'aiusage-android', 'passwordvault-android', 'issueboard-android'
           )
           $jobs = @()
           foreach ($j in ($env:RAW_JOBS -split ',')) {
@@ -384,13 +384,66 @@ jobs:
           & ./scripts/build-passwordvault-android-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+  issueboard-android:
+    name: issueboard-android-arm64
+    needs: validate
+    if: ${{ contains(needs.validate.outputs.jobs, ',issueboard-android,') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.validate.outputs.ref }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.8'
+          channel: 'stable'
+          cache: true
+      - name: Cache Gradle + dart_tool
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/caches/build-cache-1
+            ~/.gradle/wrapper
+            apps/issue-board/.dart_tool
+            apps/shared_package/.dart_tool
+          key: ${{ runner.os }}-android-issueboard-${{ hashFiles('apps/issue-board/pubspec.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-android-issueboard-
+            ${{ runner.os }}-android-
+      - name: build
+        env:
+          APP_VERSION: ${{ needs.validate.outputs.newapp_version }}
+          APP_BUILD: ${{ needs.validate.outputs.newapp_build }}
+          DAYMICA_RELEASE_TOKEN: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
+          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+          DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+          ISSUEBOARD_ANDROID_KEYSTORE_BASE64: ${{ secrets.ISSUEBOARD_ANDROID_KEYSTORE_BASE64 }}
+          ISSUEBOARD_STORE_PASSWORD: ${{ secrets.ISSUEBOARD_STORE_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
+          & ./scripts/build-issueboard-android-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
   # ---------------------------------------------------------------------------
   # Create GitHub Release after all android builds succeed (idempotent).
   # Artifacts live on RustFS; this release serves as version record + download index.
   # ---------------------------------------------------------------------------
   release:
     name: create-github-release
-    needs: [validate, daymica-android, yaoxiaobai-android, footprint-android, aiusage-android, passwordvault-android]
+    needs: [validate, daymica-android, yaoxiaobai-android, footprint-android, aiusage-android, passwordvault-android, issueboard-android]
     if: ${{ always() && needs.validate.result == 'success' && needs.validate.outputs.jobs != '' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5

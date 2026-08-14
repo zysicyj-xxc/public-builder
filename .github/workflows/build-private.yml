@@ -221,3 +221,36 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             Write-Host "Merged jobs into existing release: $tagName"
           }
+
+  # 本平台全部 job（含 release）结束后发信。无 backend/web jobs 时不发。
+  notify:
+    name: Notify mail
+    needs: [validate, daymica-web, backend, release]
+    if: ${{ always() && (needs.validate.result == 'failure' || needs.validate.outputs.jobs != '') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Send mail
+        continue-on-error: true
+        uses: ./.github/actions/notify-mail
+        with:
+          workflow: public-builder-backend
+          result: ${{ contains(needs.*.result, 'failure') && 'failure' || contains(needs.*.result, 'cancelled') && 'cancelled' || 'success' }}
+          ref: ${{ needs.validate.outputs.ref }}
+          job_results: |
+            validate: ${{ needs.validate.result }}
+            daymica-web: ${{ needs.daymica-web.result }}
+            backend: ${{ needs.backend.result }}
+            release: ${{ needs.release.result }}
+          note: ${{ contains(needs.*.result, 'failure') && 'Backend/Web 打包未全部成功，请打开 Run 查看失败 job。' || format('Backend/Web 打包已结束。jobs={0}', needs.validate.outputs.jobs) }}
+          run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          auth_code: ${{ secrets.NOTIFY_MAIL_AUTH_CODE }}
+          mail_from: ${{ secrets.NOTIFY_MAIL_FROM }}
+          mail_to: ${{ secrets.NOTIFY_MAIL_TO }}
+          github_token: ${{ github.token }}

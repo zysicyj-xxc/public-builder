@@ -1,0 +1,57 @@
+name: 'Notify mail'
+description: '打包流水线全部结束后，经 139 SMTP 发送成功/失败邮件'
+inputs:
+  workflow:
+    required: true
+  result:
+    required: true
+  ref:
+    required: true
+  job_results:
+    required: true
+    description: '每行一条 job: result'
+  note:
+    required: false
+    default: ''
+  run_url:
+    required: true
+  auth_code:
+    required: true
+  mail_from:
+    required: true
+  mail_to:
+    required: true
+  github_token:
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Send 139 mail
+      shell: pwsh
+      env:
+        NOTIFY_MAIL_AUTH_CODE: ${{ inputs.auth_code }}
+        NOTIFY_MAIL_FROM: ${{ inputs.mail_from }}
+        NOTIFY_MAIL_TO: ${{ inputs.mail_to }}
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+        INPUT_WORKFLOW: ${{ inputs.workflow }}
+        INPUT_RESULT: ${{ inputs.result }}
+        INPUT_REF: ${{ inputs.ref }}
+        INPUT_JOB_RESULTS: ${{ inputs.job_results }}
+        INPUT_NOTE: ${{ inputs.note }}
+        INPUT_RUN_URL: ${{ inputs.run_url }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        . "${{ github.action_path }}/notify-mail.ps1"
+        $jobs = [ordered]@{}
+        foreach ($line in ($env:INPUT_JOB_RESULTS -split "(`r`n|`n|`r)")) {
+          $t = $line.Trim()
+          if (-not $t) { continue }
+          $idx = $t.IndexOf(':')
+          if ($idx -lt 1) { continue }
+          $jobs[$t.Substring(0, $idx).Trim()] = $t.Substring($idx + 1).Trim()
+        }
+        $ref = $env:INPUT_REF
+        if ($ref.StartsWith('refs/tags/')) { $ref = $ref.Substring(10) }
+        Send-CiMail -Subject (New-CiNotifySubject -Workflow $env:INPUT_WORKFLOW -Result $env:INPUT_RESULT -Ref $ref) `
+                    -Body (New-CiNotifyBody -Workflow $env:INPUT_WORKFLOW -Result $env:INPUT_RESULT -Ref $ref -JobResults $jobs -RunUrl $env:INPUT_RUN_URL -Note $env:INPUT_NOTE)

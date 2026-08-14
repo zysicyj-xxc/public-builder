@@ -1,5 +1,5 @@
 name: 'Notify mail'
-description: '打包流水线全部结束后，经 139 SMTP 发送成功/失败邮件'
+description: '打包流水线全部结束后发送成功/失败邮件（优先生产后端代发 139）'
 inputs:
   workflow:
     required: true
@@ -23,6 +23,14 @@ inputs:
     required: true
   github_token:
     required: true
+  release_token:
+    required: false
+    default: ''
+    description: 'DAYMICA_RELEASE_TOKEN，用于后端代发'
+  api_base:
+    required: false
+    default: ''
+    description: '后端根 URL，如 https://api-daymica.zysicyj.top'
 
 runs:
   using: composite
@@ -34,6 +42,8 @@ runs:
         NOTIFY_MAIL_FROM: ${{ inputs.mail_from }}
         NOTIFY_MAIL_TO: ${{ inputs.mail_to }}
         GITHUB_TOKEN: ${{ inputs.github_token }}
+        DAYMICA_RELEASE_TOKEN: ${{ inputs.release_token }}
+        CI_NOTIFY_API_BASE: ${{ inputs.api_base }}
         INPUT_WORKFLOW: ${{ inputs.workflow }}
         INPUT_RESULT: ${{ inputs.result }}
         INPUT_REF: ${{ inputs.ref }}

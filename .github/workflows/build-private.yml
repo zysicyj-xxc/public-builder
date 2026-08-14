@@ -254,3 +254,5 @@ jobs:
           mail_from: ${{ secrets.NOTIFY_MAIL_FROM }}
           mail_to: ${{ secrets.NOTIFY_MAIL_TO }}
           github_token: ${{ github.token }}
+          release_token: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
+          api_base: ${{ needs.validate.outputs.backend_url }}

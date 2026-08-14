@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-  CI 完成/失败邮件通知（139 SMTP 直发）。点源后调用 Send-CiMail / New-CiNotifySubject / New-CiNotifyBody。
+  CI 完成/失败邮件通知。优先经生产后端代发 139 邮件；失败再直连 SMTP。
 
 .DESCRIPTION
   供 .github/workflows 的 notify 汇总 job 使用：
@@ -12,9 +12,12 @@
     NOTIFY_MAIL_AUTH_CODE  139 邮箱授权码（SMTP 密码，GitHub Secret）
     NOTIFY_MAIL_FROM       发件人，如 zysicyj@139.com（GitHub Secret）
     NOTIFY_MAIL_TO         收件人，逗号分隔多个（GitHub Secret）
+    DAYMICA_RELEASE_TOKEN  发布令牌；与 CI_NOTIFY_API_BASE/BACKEND_URL 同时存在时走后端代发
+    CI_NOTIFY_API_BASE     后端根 URL，如 https://api-daymica.zysicyj.top（也可用 BACKEND_URL）
 
-  端口：默认 465（SMTPS 隐式 TLS + AUTH LOGIN，与后端 smtp_sender.go 一致）。
-  GitHub-hosted runner 会拦 25；System.Net.Mail.SmtpClient 也不会做 465 隐式 TLS。
+  GitHub-hosted runner 直连 smtp.139.com 会被 139 以「Mail rejected score」拒信。
+  因此优先 POST /api/version/ci-notify-mail，由生产机 SMTP 发出。
+  SMTP 回退：默认 465（SMTPS 隐式 TLS + AUTH LOGIN）。
   脚本退出码非 0 表示发送失败；workflow 侧用 continue-on-error，通知失败不影响 CI 结论。
 
 .NOTES
@@ -24,7 +27,7 @@
 function New-CiNotifySubject {
     <#
     .SYNOPSIS
-      主题模板：`[CI] {workflow} {成功|失败|跳过|取消} — {ref}`
+      主题模板：`打包通知：{workflow} {成功|失败|跳过|取消} — {ref}`
     #>
     param(
         [Parameter(Mandatory = $true)][string] $Workflow,
@@ -39,7 +42,7 @@ function New-CiNotifySubject {
         default     { $Result }
     }
     $refPart = if ($Ref) { " — $Ref" } else { '' }
-    return "[CI] $Workflow $resultTxt$refPart"
+    return "打包通知：$Workflow $resultTxt$refPart"
 }
 
 function New-CiNotifyBody {
@@ -130,6 +133,72 @@ function ConvertTo-MimeHeader {
     return "=?UTF-8?B?$([Convert]::ToBase64String($bytes))?="
 }
 
+function Get-Rfc5322Date {
+    $now = [DateTimeOffset]::Now
+    $en = [Globalization.CultureInfo]::GetCultureInfo('en-US')
+    $date = $now.ToString('ddd, dd MMM yyyy HH:mm:ss', $en)
+    $off = $now.Offset
+    $sign = if ($off.Ticks -ge 0) { '+' } else { '-' }
+    $tz = '{0}{1:00}{2:00}' -f $sign, [Math]::Abs($off.Hours), [Math]::Abs($off.Minutes)
+    return "$date $tz"
+}
+
+function ConvertTo-CiNotifyHtml {
+    param(
+        [Parameter(Mandatory = $true)][string] $Body,
+        [string] $Title = '打包通知'
+    )
+    if ($Body -match '(?i)<html') { return $Body }
+    $encBody = [System.Net.WebUtility]::HtmlEncode($Body) -replace "`r`n", '<br>' -replace "`n", '<br>'
+    $encTitle = [System.Net.WebUtility]::HtmlEncode($Title)
+    return @"
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; padding: 40px 0;">
+  <div style="max-width: 480px; margin: 0 auto; background: #ffffff; border-radius: 16px; padding: 40px 32px;">
+    <h2 style="color: #1a1a1a; margin: 0 0 16px; font-size: 22px;">$encTitle</h2>
+    <div style="color: #444; font-size: 14px; line-height: 1.6;">$encBody</div>
+  </div>
+</body>
+</html>
+"@
+}
+
+function Send-CiMailViaBackend {
+    param(
+        [Parameter(Mandatory = $true)][string] $Subject,
+        [Parameter(Mandatory = $true)][string] $HtmlBody
+    )
+    $base = $env:CI_NOTIFY_API_BASE
+    if (-not $base) { $base = $env:BACKEND_URL }
+    $token = $env:DAYMICA_RELEASE_TOKEN
+    if (-not $base -or -not $token) { return $false }
+    $base = $base.Trim().TrimEnd('/')
+    $to = $env:NOTIFY_MAIL_TO
+    if (-not $to) { return $false }
+    $json = (@{ to = $to; subject = $Subject; body = $HtmlBody } | ConvertTo-Json -Compress -Depth 5)
+    try {
+        $resp = Invoke-WebRequest -Uri "$base/api/version/ci-notify-mail" -Method POST `
+            -Headers @{
+                'X-Daymica-Release-Token' = $token
+                'Content-Type'            = 'application/json; charset=utf-8'
+            } `
+            -Body ([System.Text.Encoding]::UTF8.GetBytes($json)) `
+            -TimeoutSec 30 `
+            -UseBasicParsing
+        if ($resp.StatusCode -ge 200 -and $resp.StatusCode -lt 300) {
+            Write-Host "Mail sent via backend API ($($resp.StatusCode)): $Subject"
+            return $true
+        }
+        Write-Warning "backend notify HTTP $($resp.StatusCode)"
+        return $false
+    } catch {
+        Write-Warning "backend notify failed, fallback SMTP: $($_.Exception.Message)"
+        return $false
+    }
+}
+
 function Read-SmtpReply {
     param([Parameter(Mandatory = $true)][System.IO.Stream] $Stream)
     $lines = [System.Collections.Generic.List[string]]::new()
@@ -208,7 +277,7 @@ function Send-CiMailImplicitTls {
         $greet = Read-SmtpReply -Stream $ssl
         Assert-SmtpCode -Lines $greet -ExpectPrefix '220' -Context 'SMTP greeting'
 
-        Send-SmtpLine -Stream $ssl -Line 'EHLO github-actions'
+        Send-SmtpLine -Stream $ssl -Line 'EHLO zysicyj.top'
         $ehlo = Read-SmtpReply -Stream $ssl
         Assert-SmtpCode -Lines $ehlo -ExpectPrefix '250' -Context 'EHLO'
 
@@ -233,19 +302,27 @@ function Send-CiMailImplicitTls {
         Assert-SmtpCode -Lines (Read-SmtpReply -Stream $ssl) -ExpectPrefix '354' -Context 'DATA'
 
         $subjectHeader = ConvertTo-MimeHeader -Text $Subject
+        $fromHeader = "=?UTF-8?B?$([Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes('打包通知')))?= <$From>"
         $toHeader = $Recipients -join ', '
+        $msgId = "<$([guid]::NewGuid().ToString('N'))@$($From.Split('@')[-1])>"
+        $html = ConvertTo-CiNotifyHtml -Body $Body -Title $Subject
+        $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($html))
+        $wrapped = for ($i = 0; $i -lt $b64.Length; $i += 76) {
+            $len = [Math]::Min(76, $b64.Length - $i)
+            $b64.Substring($i, $len)
+        }
         $payload = @(
-            "From: $From"
+            "From: $fromHeader"
             "To: $toHeader"
+            "Date: $(Get-Rfc5322Date)"
+            "Message-ID: $msgId"
             "Subject: $subjectHeader"
             'MIME-Version: 1.0'
-            'Content-Type: text/plain; charset=UTF-8'
-            'Content-Transfer-Encoding: 8bit'
+            'Content-Type: text/html; charset=UTF-8'
+            'Content-Transfer-Encoding: base64'
             ''
-            (($Body -split "`r?`n" | ForEach-Object { if ($_.StartsWith('.')) { ".$_" } else { $_ } }) -join "`r`n")
-            '.'
         ) -join "`r`n"
-        $payloadBytes = [System.Text.Encoding]::UTF8.GetBytes($payload + "`r`n")
+        $payloadBytes = [System.Text.Encoding]::ASCII.GetBytes($payload + "`r`n" + (($wrapped -join "`r`n") + "`r`n.`r`n"))
         $ssl.Write($payloadBytes, 0, $payloadBytes.Length)
         $ssl.Flush()
         Assert-SmtpCode -Lines (Read-SmtpReply -Stream $ssl) -ExpectPrefix '250' -Context 'DATA body'
@@ -278,10 +355,8 @@ function Send-CiMail {
 
     $from = $env:NOTIFY_MAIL_FROM
     $to = $env:NOTIFY_MAIL_TO
-    $auth = $env:NOTIFY_MAIL_AUTH_CODE
     if (-not $from) { throw 'NOTIFY_MAIL_FROM env missing' }
     if (-not $to) { throw 'NOTIFY_MAIL_TO env missing' }
-    if (-not $auth) { throw 'NOTIFY_MAIL_AUTH_CODE env missing' }
 
     $recipients = @()
     foreach ($addr in ($to -split ',')) {
@@ -289,6 +364,14 @@ function Send-CiMail {
         if ($t) { $recipients += $t }
     }
     if ($recipients.Count -eq 0) { throw 'NOTIFY_MAIL_TO has no recipients' }
+
+    $html = ConvertTo-CiNotifyHtml -Body $Body -Title $Subject
+    if (Send-CiMailViaBackend -Subject $Subject -HtmlBody $html) {
+        return
+    }
+
+    $auth = $env:NOTIFY_MAIL_AUTH_CODE
+    if (-not $auth) { throw 'NOTIFY_MAIL_AUTH_CODE env missing (SMTP fallback)' }
 
     if ($Port -eq 465) {
         Send-CiMailImplicitTls -SmtpServer $SmtpServer -Port $Port -From $from `
@@ -298,7 +381,8 @@ function Send-CiMail {
         $msg.From = [System.Net.Mail.MailAddress]::new($from)
         foreach ($rcpt in $recipients) { $null = $msg.To.Add($rcpt) }
         $msg.Subject = $Subject
-        $msg.Body = $Body
+        $msg.Body = ConvertTo-CiNotifyHtml -Body $Body -Title $Subject
+        $msg.IsBodyHtml = $true
         $msg.SubjectEncoding = [System.Text.Encoding]::UTF8
         $msg.BodyEncoding = [System.Text.Encoding]::UTF8
         $client = [System.Net.Mail.SmtpClient]::new($SmtpServer, $Port)

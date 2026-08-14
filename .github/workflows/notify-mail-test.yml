@@ -1,0 +1,36 @@
+# 手动测一封打包通知，不跑构建。
+name: Notify mail test
+
+on:
+  workflow_dispatch:
+    inputs:
+      note:
+        description: '邮件备注'
+        required: false
+        default: '连通性测试（经生产后端代发）'
+
+jobs:
+  send:
+    name: Send test mail
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Send mail
+        uses: ./.github/actions/notify-mail
+        with:
+          workflow: notify-mail-test
+          result: success
+          ref: workflow_dispatch
+          job_results: |
+            test: success
+          note: ${{ inputs.note }}
+          run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          auth_code: ${{ secrets.NOTIFY_MAIL_AUTH_CODE }}
+          mail_from: ${{ secrets.NOTIFY_MAIL_FROM }}
+          mail_to: ${{ secrets.NOTIFY_MAIL_TO }}
+          github_token: ${{ github.token }}
+          release_token: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
+          api_base: https://api-daymica.zysicyj.top

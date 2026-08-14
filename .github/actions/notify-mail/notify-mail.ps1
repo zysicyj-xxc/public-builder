@@ -181,6 +181,7 @@ function Send-CiMailViaBackend {
     try {
         $resp = Invoke-WebRequest -Uri "$base/api/version/ci-notify-mail" -Method POST `
             -Headers @{
+                'X-App-ID'                = 'daymica'
                 'X-Daymica-Release-Token' = $token
                 'Content-Type'            = 'application/json; charset=utf-8'
             } `
@@ -191,10 +192,11 @@ function Send-CiMailViaBackend {
             Write-Host "Mail sent via backend API ($($resp.StatusCode)): $Subject"
             return $true
         }
-        Write-Warning "backend notify HTTP $($resp.StatusCode)"
+        Write-Warning "backend notify HTTP $($resp.StatusCode) $($resp.Content)"
         return $false
     } catch {
-        Write-Warning "backend notify failed, fallback SMTP: $($_.Exception.Message)"
+        $detail = $_.ErrorDetails.Message
+        Write-Warning "backend notify failed, fallback SMTP: $($_.Exception.Message) $detail"
         return $false
     }
 }

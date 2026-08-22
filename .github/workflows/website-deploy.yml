@@ -1,0 +1,70 @@
+# 官网静态部署。私有仓 website-deploy.yml 派发到这里实际 next build + 下发 .7。
+# Trust boundary: only repository_dispatch; treat client_payload as untrusted.
+
+name: Public Builder Website Deploy
+
+on:
+  repository_dispatch:
+    types: [website-deploy]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pb-website-deploy
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  deploy:
+    name: website-static
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Validate payload
+        id: v
+        env:
+          RAW_REF: ${{ github.event.client_payload.ref }}
+          RAW_SHA: ${{ github.event.client_payload.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ref = if ($null -eq $env:RAW_REF) { '' } else { $env:RAW_REF.Trim() }
+          $sha = if ($null -eq $env:RAW_SHA) { '' } else { $env:RAW_SHA.Trim().ToLowerInvariant() }
+          if ($ref -notmatch '^refs/heads/main$') { throw "ref not allowed: $ref" }
+          if ($sha -notmatch '^[0-9a-f]{40}$') { throw "sha failed allowlist: $sha" }
+          "sha=$sha" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "OK ref=$ref sha=$sha"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ steps.v.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Enable pnpm
+        run: corepack enable
+
+      - name: deploy
+        env:
+          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+          DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+          WEBHOOK_DEPLOY_KEY: ${{ secrets.WEBHOOK_DEPLOY_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./scripts/deploy-website-static-prod.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

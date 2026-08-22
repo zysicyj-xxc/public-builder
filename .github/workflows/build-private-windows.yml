@@ -69,7 +69,7 @@ jobs:
           }
 
           # 三路 workflow 都会收到同一 dispatch；本路无对应 app 时 soft-skip，勿把整次 run 标红
-          $refPattern = '^refs/tags/(daymica|yaoxiaobai|footprint|backend|ai-usage|easy-shell|system-monitor|password-vault|clean-master|eye-care|issue-board|mail-box)/(?:[0-9]{12}|[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}-[0-9]+)$'
+          $refPattern = '^refs/tags/(daymica|yaoxiaobai|footprint|backend|ai-usage|easy-shell|system-monitor|password-vault|clean-master|eye-care|issue-board|mail-box|token-board)/(?:[0-9]{12}|[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}-[0-9]+)$'
           $rawRef = if ($null -eq $env:RAW_REF) { '' } else { $env:RAW_REF.Trim() }
           if ([string]::IsNullOrWhiteSpace($rawRef)) { throw 'ref is empty' }
           if ($rawRef -notmatch $refPattern) {
@@ -85,7 +85,7 @@ jobs:
           $allowedJobs = @(
             'daymica-windows', 'aiusage-windows', 'easyshell-windows',
             'systemmonitor-windows', 'passwordvault-windows', 'cleanmaster-windows', 'eyecare-windows',
-            'issueboard-windows', 'mailbox-windows'
+            'issueboard-windows', 'mailbox-windows', 'tokenboard-windows'
           )
           $jobs = @()
           foreach ($j in ($env:RAW_JOBS -split ',')) {
@@ -574,13 +574,71 @@ jobs:
           & ./scripts/build-flutter-windows-prod.ps1 -AppSlug mail-box -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+  tokenboard-windows:
+    name: tokenboard-windows
+    needs: validate
+    if: ${{ contains(needs.validate.outputs.jobs, ',tokenboard-windows,') }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.validate.outputs.ref }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.8'
+          channel: 'stable'
+          cache: true
+      - name: Ensure Inno Setup
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $iscc = @(
+            $env:INNO_SETUP_ISCC,
+            (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'),
+            (Join-Path $env:ProgramFiles 'Inno Setup 6\ISCC.exe'),
+            (Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6\ISCC.exe')
+          ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+          if (-not $iscc) {
+            choco install innosetup --no-progress -y
+          }
+      - name: Cache build + dart_tool
+        uses: actions/cache@v4
+        with:
+          path: |
+            apps/token-board/.dart_tool
+            apps/shared_package/.dart_tool
+            apps/token-board/build
+          key: ${{ runner.os }}-windows-tokenboard-${{ hashFiles('apps/token-board/pubspec.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-windows-tokenboard-
+            ${{ runner.os }}-windows-
+      - name: build
+        env:
+          APP_VERSION: ${{ needs.validate.outputs.newapp_version }}
+          APP_BUILD: ${{ needs.validate.outputs.newapp_build }}
+          DAYMICA_RELEASE_TOKEN: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
+          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+          DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
+          & ./scripts/build-flutter-windows-prod.ps1 -AppSlug token-board -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
   # ---------------------------------------------------------------------------
   # Create GitHub Release after all windows builds succeed (idempotent).
   # Artifacts live on RustFS; this release serves as version record + download index.
   # ---------------------------------------------------------------------------
   release:
     name: create-github-release
-    needs: [validate, daymica-windows, aiusage-windows, easyshell-windows, systemmonitor-windows, passwordvault-windows, cleanmaster-windows, eyecare-windows, issueboard-windows, mailbox-windows]
+    needs: [validate, daymica-windows, aiusage-windows, easyshell-windows, systemmonitor-windows, passwordvault-windows, cleanmaster-windows, eyecare-windows, issueboard-windows, mailbox-windows, tokenboard-windows]
     if: ${{ always() && needs.validate.result == 'success' && needs.validate.outputs.jobs != '' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -626,7 +684,7 @@ jobs:
   # 本平台全部 job（含 release）结束后发信。无 windows jobs 时不发（validate 成功且 jobs 空）。
   notify:
     name: Notify mail
-    needs: [validate, daymica-windows, aiusage-windows, easyshell-windows, systemmonitor-windows, passwordvault-windows, cleanmaster-windows, eyecare-windows, issueboard-windows, mailbox-windows, release]
+    needs: [validate, daymica-windows, aiusage-windows, easyshell-windows, systemmonitor-windows, passwordvault-windows, cleanmaster-windows, eyecare-windows, issueboard-windows, mailbox-windows, tokenboard-windows, release]
     if: ${{ always() && (needs.validate.result == 'failure' || needs.validate.outputs.jobs != '') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -655,6 +713,7 @@ jobs:
             eyecare-windows: ${{ needs.eyecare-windows.result }}
             issueboard-windows: ${{ needs.issueboard-windows.result }}
             mailbox-windows: ${{ needs.mailbox-windows.result }}
+            tokenboard-windows: ${{ needs.tokenboard-windows.result }}
             release: ${{ needs.release.result }}
           note: ${{ contains(needs.*.result, 'failure') && 'Windows 打包未全部成功，请打开 Run 查看失败 job。' || format('Windows 打包已结束。jobs={0}', needs.validate.outputs.jobs) }}
           run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

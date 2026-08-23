@@ -70,7 +70,7 @@ jobs:
           }
 
           # 三路 workflow 都会收到同一 dispatch；本路无对应 app 时 soft-skip，勿把整次 run 标红
-          $refPattern = '^refs/tags/(daymica|yaoxiaobai|footprint|backend|ai-usage|easy-shell|system-monitor|password-vault|clean-master|eye-care|issue-board|mail-box)/(?:[0-9]{12}|[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}-[0-9]+)$'
+          $refPattern = '^refs/tags/(daymica|yaoxiaobai|footprint|backend|ai-usage|easy-shell|system-monitor|password-vault|clean-master|eye-care|issue-board|mail-box)/(?:[0-9]{12}|[0-9]{4}\.[0-9]{1,2}\.[0-9]+-[0-9]+)$'
           $rawRef = if ($null -eq $env:RAW_REF) { '' } else { $env:RAW_REF.Trim() }
           if ([string]::IsNullOrWhiteSpace($rawRef)) { throw 'ref is empty' }
           if ($rawRef -notmatch $refPattern) {

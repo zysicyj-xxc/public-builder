@@ -140,17 +140,33 @@ jobs:
           ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
           fetch-depth: 1
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.8'
+          channel: 'stable'
+          cache: true
+      - name: Cache dart_tool
+        uses: actions/cache@v4
+        with:
+          path: |
+            apps/daymica/.dart_tool
+            apps/shared_package/.dart_tool
+          key: ${{ runner.os }}-web-daymica-${{ hashFiles('apps/daymica/pubspec.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-web-daymica-
       - name: build+deploy
         env:
-          CCR_USERNAME: ${{ secrets.CCR_USERNAME }}
-          CCR_PASSWORD: ${{ secrets.CCR_PASSWORD }}
+          APP_VERSION: ${{ needs.validate.outputs.daymica_version }}
+          APP_BUILD: ${{ needs.validate.outputs.daymica_build }}
+          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+          DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
           WEBHOOK_DEPLOY_KEY: ${{ secrets.WEBHOOK_DEPLOY_KEY }}
         run: |
           $ErrorActionPreference = 'Stop'
-          docker version
-          & ./scripts/deploy-all-docker-prod.ps1 -Target web -EnvName prod -Deploy
+          if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
+          & ./scripts/deploy-daymica-web-static-prod.ps1 -Version $env:APP_VERSION -BuildNumber $env:APP_BUILD
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   backend:

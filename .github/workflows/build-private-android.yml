@@ -83,7 +83,7 @@ jobs:
           $mode = Assert-Match 'mode' $env:RAW_MODE.Trim() '^release$'
 
           $allowedJobs = @(
-            'daymica-android', 'yaoxiaobai-android', 'footprint-android',
+            'daymica-android', 'daymica-play', 'yaoxiaobai-android', 'footprint-android',
             'aiusage-android', 'passwordvault-android', 'issueboard-android',
             'mailbox-android', 'tokenboard-android'
           )
@@ -186,6 +186,68 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:KEY_ALIAS)) { $env:KEY_ALIAS = 'daymica' }
           & ./scripts/build-daymica-android-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  daymica-play:
+    name: daymica-play-aab
+    needs: validate
+    if: ${{ contains(needs.validate.outputs.jobs, ',daymica-play,') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.validate.outputs.ref }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.8'
+          channel: 'stable'
+          cache: true
+      - name: Cache Gradle + dart_tool
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/caches/build-cache-1
+            ~/.gradle/wrapper
+            apps/daymica/.dart_tool
+            apps/shared_package/.dart_tool
+          key: ${{ runner.os }}-android-daymica-${{ hashFiles('apps/daymica/pubspec.lock', 'apps/daymica/android/build.gradle') }}
+          restore-keys: |
+            ${{ runner.os }}-android-daymica-
+            ${{ runner.os }}-android-
+      - name: build
+        env:
+          APP_VERSION: ${{ needs.validate.outputs.daymica_version }}
+          APP_BUILD: ${{ needs.validate.outputs.daymica_build }}
+          ZYSICYJ_BACKEND_HOST: ${{ needs.validate.outputs.backend_url }}
+          DAYMICA_ANDROID_KEYSTORE_BASE64: ${{ secrets.DAYMICA_ANDROID_KEYSTORE_BASE64 }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
+          if ([string]::IsNullOrWhiteSpace($env:DAYMICA_ANDROID_KEYSTORE_BASE64)) { throw 'DAYMICA_ANDROID_KEYSTORE_BASE64 secret missing' }
+          if ([string]::IsNullOrWhiteSpace($env:KEY_PASSWORD)) { throw 'KEY_PASSWORD secret missing' }
+          if ([string]::IsNullOrWhiteSpace($env:STORE_PASSWORD)) { throw 'STORE_PASSWORD secret missing' }
+          if ([string]::IsNullOrWhiteSpace($env:KEY_ALIAS)) { $env:KEY_ALIAS = 'daymica' }
+          & ./scripts/build-daymica-android-play-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: upload AAB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: daymica-play-aab-${{ needs.validate.outputs.daymica_version }}-${{ needs.validate.outputs.daymica_build }}
+          path: apps/daymica/build/app/outputs/bundle/playRelease/app-play-release.aab
+          if-no-files-found: error
+          retention-days: 30
 
   yaoxiaobai-android:
     name: yaoxiaobai-android-arm64

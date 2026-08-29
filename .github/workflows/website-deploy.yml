@@ -44,7 +44,7 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
           ref: ${{ steps.v.outputs.sha }}
           persist-credentials: false
-          fetch-depth: 1
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:

@@ -205,6 +205,9 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.44.8'
@@ -223,7 +226,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-android-daymica-
             ${{ runner.os }}-android-
-      - name: build
+      - name: build and upload Play
         env:
           APP_VERSION: ${{ needs.validate.outputs.daymica_version }}
           APP_BUILD: ${{ needs.validate.outputs.daymica_build }}
@@ -232,14 +235,21 @@ jobs:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          PLAY_SERVICE_ACCOUNT_JSON_B64: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON_B64 }}
+          DAYMICA_RELEASE_TOKEN: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
         run: |
           $ErrorActionPreference = 'Stop'
           if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
           if ([string]::IsNullOrWhiteSpace($env:DAYMICA_ANDROID_KEYSTORE_BASE64)) { throw 'DAYMICA_ANDROID_KEYSTORE_BASE64 secret missing' }
           if ([string]::IsNullOrWhiteSpace($env:KEY_PASSWORD)) { throw 'KEY_PASSWORD secret missing' }
           if ([string]::IsNullOrWhiteSpace($env:STORE_PASSWORD)) { throw 'STORE_PASSWORD secret missing' }
+          if ([string]::IsNullOrWhiteSpace($env:PLAY_SERVICE_ACCOUNT_JSON_B64)) { throw 'PLAY_SERVICE_ACCOUNT_JSON_B64 secret missing' }
           if ([string]::IsNullOrWhiteSpace($env:KEY_ALIAS)) { $env:KEY_ALIAS = 'daymica' }
-          & ./scripts/build-daymica-android-play-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
+          & ./scripts/ci-daymica-android-play-prod.ps1 `
+            -Version $env:APP_VERSION `
+            -BuildNumber ([int]$env:APP_BUILD) `
+            -Track internal `
+            -ReleaseStatus completed
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: upload AAB artifact
         uses: actions/upload-artifact@v4
@@ -623,7 +633,7 @@ jobs:
   # ---------------------------------------------------------------------------
   release:
     name: create-github-release
-    needs: [validate, daymica-android, yaoxiaobai-android, footprint-android, aiusage-android, passwordvault-android, issueboard-android, mailbox-android, tokenboard-android]
+    needs: [validate, daymica-android, daymica-play, yaoxiaobai-android, footprint-android, aiusage-android, passwordvault-android, issueboard-android, mailbox-android, tokenboard-android]
     if: ${{ always() && needs.validate.result == 'success' && needs.validate.outputs.jobs != '' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -669,7 +679,7 @@ jobs:
   # 本平台全部 job（含 release）结束后发信。无 android jobs 时不发（validate 成功且 jobs 空）。
   notify:
     name: Notify mail
-    needs: [validate, daymica-android, yaoxiaobai-android, footprint-android, aiusage-android, passwordvault-android, issueboard-android, mailbox-android, tokenboard-android, release]
+    needs: [validate, daymica-android, daymica-play, yaoxiaobai-android, footprint-android, aiusage-android, passwordvault-android, issueboard-android, mailbox-android, tokenboard-android, release]
     if: ${{ always() && (needs.validate.result == 'failure' || needs.validate.outputs.jobs != '') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -690,6 +700,7 @@ jobs:
           job_results: |
             validate: ${{ needs.validate.result }}
             daymica-android: ${{ needs.daymica-android.result }}
+            daymica-play: ${{ needs.daymica-play.result }}
             yaoxiaobai-android: ${{ needs.yaoxiaobai-android.result }}
             footprint-android: ${{ needs.footprint-android.result }}
             aiusage-android: ${{ needs.aiusage-android.result }}

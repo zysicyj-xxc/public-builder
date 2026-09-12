@@ -1,6 +1,10 @@
 # Android builds only. 与 build-private-windows.yml 独立（独立 concurrency + 独立 release），
 # 一个平台失败不影响另一个平台的构建/发布。
 # Trust boundary: only repository_dispatch; treat client_payload as untrusted.
+#
+# Gradle 缓存：全部 Android job 共用 Linux-gradle-shared-v2（~/.gradle/caches + wrapper），
+# 避免按 app 各存 1.4–1.8GB 打满 10GB 配额后 LRU 互挤。dart_tool 仍按 app 小缓存。
+# daymica-play 只 restore，避免与 daymica-android 并行抢写同一 key。
 
 name: Public Builder Android
 
@@ -150,19 +154,24 @@ jobs:
           flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
-      - name: Cache Gradle + dart_tool
+      - name: Cache shared Gradle
         uses: actions/cache@v4
         with:
           path: |
-            ~/.gradle/caches/modules-2
-            ~/.gradle/caches/build-cache-1
+            ~/.gradle/caches
             ~/.gradle/wrapper
+          key: Linux-gradle-shared-v2
+          restore-keys: |
+            Linux-gradle-shared-
+      - name: Cache dart_tool
+        uses: actions/cache@v4
+        with:
+          path: |
             apps/daymica/.dart_tool
             apps/shared_package/.dart_tool
-          key: ${{ runner.os }}-android-daymica-${{ hashFiles('apps/daymica/pubspec.lock', 'apps/daymica/android/build.gradle') }}
+          key: ${{ runner.os }}-darttool-daymica-${{ hashFiles('apps/daymica/pubspec.lock') }}
           restore-keys: |
-            ${{ runner.os }}-android-daymica-
-            ${{ runner.os }}-android-
+            ${{ runner.os }}-darttool-daymica-
       - name: build
         env:
           APP_VERSION: ${{ needs.validate.outputs.daymica_version }}
@@ -216,19 +225,25 @@ jobs:
           flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
-      - name: Cache Gradle + dart_tool
+      # 只 restore：与 daymica-android 并行时不要抢写同一份 Gradle 缓存。
+      - name: Restore shared Gradle
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: Linux-gradle-shared-v2
+          restore-keys: |
+            Linux-gradle-shared-
+      - name: Cache dart_tool
         uses: actions/cache@v4
         with:
           path: |
-            ~/.gradle/caches/modules-2
-            ~/.gradle/caches/build-cache-1
-            ~/.gradle/wrapper
             apps/daymica/.dart_tool
             apps/shared_package/.dart_tool
-          key: ${{ runner.os }}-android-daymica-${{ hashFiles('apps/daymica/pubspec.lock', 'apps/daymica/android/build.gradle') }}
+          key: ${{ runner.os }}-darttool-daymica-${{ hashFiles('apps/daymica/pubspec.lock') }}
           restore-keys: |
-            ${{ runner.os }}-android-daymica-
-            ${{ runner.os }}-android-
+            ${{ runner.os }}-darttool-daymica-
       - name: build and upload Play
         env:
           APP_VERSION: ${{ needs.validate.outputs.daymica_version }}
@@ -285,19 +300,24 @@ jobs:
           flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
-      - name: Cache Gradle + dart_tool
+      - name: Cache shared Gradle
         uses: actions/cache@v4
         with:
           path: |
-            ~/.gradle/caches/modules-2
-            ~/.gradle/caches/build-cache-1
+            ~/.gradle/caches
             ~/.gradle/wrapper
+          key: Linux-gradle-shared-v2
+          restore-keys: |
+            Linux-gradle-shared-
+      - name: Cache dart_tool
+        uses: actions/cache@v4
+        with:
+          path: |
             apps/yaoxiaobai/yaoxiaobai_app/.dart_tool
             apps/shared_package/.dart_tool
-          key: ${{ runner.os }}-android-yaoxiaobai-${{ hashFiles('apps/yaoxiaobai/yaoxiaobai_app/pubspec.lock') }}
+          key: ${{ runner.os }}-darttool-yaoxiaobai-${{ hashFiles('apps/yaoxiaobai/yaoxiaobai_app/pubspec.lock') }}
           restore-keys: |
-            ${{ runner.os }}-android-yaoxiaobai-
-            ${{ runner.os }}-android-
+            ${{ runner.os }}-darttool-yaoxiaobai-
       - name: build
         env:
           APP_VERSION: ${{ needs.validate.outputs.yaoxiaobai_version }}
@@ -337,19 +357,24 @@ jobs:
           flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
-      - name: Cache Gradle + dart_tool
+      - name: Cache shared Gradle
         uses: actions/cache@v4
         with:
           path: |
-            ~/.gradle/caches/modules-2
-            ~/.gradle/caches/build-cache-1
+            ~/.gradle/caches
             ~/.gradle/wrapper
+          key: Linux-gradle-shared-v2
+          restore-keys: |
+            Linux-gradle-shared-
+      - name: Cache dart_tool
+        uses: actions/cache@v4
+        with:
+          path: |
             apps/footprint/.dart_tool
             apps/shared_package/.dart_tool
-          key: ${{ runner.os }}-android-footprint-${{ hashFiles('apps/footprint/pubspec.lock') }}
+          key: ${{ runner.os }}-darttool-footprint-${{ hashFiles('apps/footprint/pubspec.lock') }}
           restore-keys: |
-            ${{ runner.os }}-android-footprint-
-            ${{ runner.os }}-android-
+            ${{ runner.os }}-darttool-footprint-
       - name: build
         env:
           APP_VERSION: ${{ needs.validate.outputs.footprint_version }}
@@ -388,19 +413,24 @@ jobs:
           flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
-      - name: Cache Gradle + dart_tool
+      - name: Cache shared Gradle
         uses: actions/cache@v4
         with:
           path: |
-            ~/.gradle/caches/modules-2
-            ~/.gradle/caches/build-cache-1
+            ~/.gradle/caches
             ~/.gradle/wrapper
+          key: Linux-gradle-shared-v2
+          restore-keys: |
+            Linux-gradle-shared-
+      - name: Cache dart_tool
+        uses: actions/cache@v4
+        with:
+          path: |
             apps/ai-usage/.dart_tool
             apps/shared_package/.dart_tool
-          key: ${{ runner.os }}-android-aiusage-${{ hashFiles('apps/ai-usage/pubspec.lock') }}
+          key: ${{ runner.os }}-darttool-aiusage-${{ hashFiles('apps/ai-usage/pubspec.lock') }}
           restore-keys: |
-            ${{ runner.os }}-android-aiusage-
-            ${{ runner.os }}-android-
+            ${{ runner.os }}-darttool-aiusage-
       - name: build
         env:
           APP_VERSION: ${{ needs.validate.outputs.newapp_version }}
@@ -441,19 +471,24 @@ jobs:
           flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
-      - name: Cache Gradle + dart_tool
+      - name: Cache shared Gradle
         uses: actions/cache@v4
         with:
           path: |
-            ~/.gradle/caches/modules-2
-            ~/.gradle/caches/build-cache-1
+            ~/.gradle/caches
             ~/.gradle/wrapper
+          key: Linux-gradle-shared-v2
+          restore-keys: |
+            Linux-gradle-shared-
+      - name: Cache dart_tool
+        uses: actions/cache@v4
+        with:
+          path: |
             apps/password-vault/.dart_tool
             apps/shared_package/.dart_tool
-          key: ${{ runner.os }}-android-passwordvault-${{ hashFiles('apps/password-vault/pubspec.lock') }}
+          key: ${{ runner.os }}-darttool-passwordvault-${{ hashFiles('apps/password-vault/pubspec.lock') }}
           restore-keys: |
-            ${{ runner.os }}-android-passwordvault-
-            ${{ runner.os }}-android-
+            ${{ runner.os }}-darttool-passwordvault-
       - name: build
         env:
           APP_VERSION: ${{ needs.validate.outputs.newapp_version }}
@@ -494,19 +529,24 @@ jobs:
           flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
-      - name: Cache Gradle + dart_tool
+      - name: Cache shared Gradle
         uses: actions/cache@v4
         with:
           path: |
-            ~/.gradle/caches/modules-2
-            ~/.gradle/caches/build-cache-1
+            ~/.gradle/caches
             ~/.gradle/wrapper
+          key: Linux-gradle-shared-v2
+          restore-keys: |
+            Linux-gradle-shared-
+      - name: Cache dart_tool
+        uses: actions/cache@v4
+        with:
+          path: |
             apps/issue-board/.dart_tool
             apps/shared_package/.dart_tool
-          key: ${{ runner.os }}-android-issueboard-${{ hashFiles('apps/issue-board/pubspec.lock') }}
+          key: ${{ runner.os }}-darttool-issueboard-${{ hashFiles('apps/issue-board/pubspec.lock') }}
           restore-keys: |
-            ${{ runner.os }}-android-issueboard-
-            ${{ runner.os }}-android-
+            ${{ runner.os }}-darttool-issueboard-
       - name: build
         env:
           APP_VERSION: ${{ needs.validate.outputs.newapp_version }}
@@ -547,19 +587,24 @@ jobs:
           flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
-      - name: Cache Gradle + dart_tool
+      - name: Cache shared Gradle
         uses: actions/cache@v4
         with:
           path: |
-            ~/.gradle/caches/modules-2
-            ~/.gradle/caches/build-cache-1
+            ~/.gradle/caches
             ~/.gradle/wrapper
+          key: Linux-gradle-shared-v2
+          restore-keys: |
+            Linux-gradle-shared-
+      - name: Cache dart_tool
+        uses: actions/cache@v4
+        with:
+          path: |
             apps/mail-box/.dart_tool
             apps/shared_package/.dart_tool
-          key: ${{ runner.os }}-android-mailbox-${{ hashFiles('apps/mail-box/pubspec.lock') }}
+          key: ${{ runner.os }}-darttool-mailbox-${{ hashFiles('apps/mail-box/pubspec.lock') }}
           restore-keys: |
-            ${{ runner.os }}-android-mailbox-
-            ${{ runner.os }}-android-
+            ${{ runner.os }}-darttool-mailbox-
       - name: build
         env:
           APP_VERSION: ${{ needs.validate.outputs.newapp_version }}
@@ -600,19 +645,24 @@ jobs:
           flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
-      - name: Cache Gradle + dart_tool
+      - name: Cache shared Gradle
         uses: actions/cache@v4
         with:
           path: |
-            ~/.gradle/caches/modules-2
-            ~/.gradle/caches/build-cache-1
+            ~/.gradle/caches
             ~/.gradle/wrapper
+          key: Linux-gradle-shared-v2
+          restore-keys: |
+            Linux-gradle-shared-
+      - name: Cache dart_tool
+        uses: actions/cache@v4
+        with:
+          path: |
             apps/token-board/.dart_tool
             apps/shared_package/.dart_tool
-          key: ${{ runner.os }}-android-tokenboard-${{ hashFiles('apps/token-board/pubspec.lock') }}
+          key: ${{ runner.os }}-darttool-tokenboard-${{ hashFiles('apps/token-board/pubspec.lock') }}
           restore-keys: |
-            ${{ runner.os }}-android-tokenboard-
-            ${{ runner.os }}-android-
+            ${{ runner.os }}-darttool-tokenboard-
       - name: build
         env:
           APP_VERSION: ${{ needs.validate.outputs.newapp_version }}

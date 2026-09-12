@@ -191,6 +191,9 @@ jobs:
     name: daymica-play-aab
     needs: validate
     if: ${{ contains(needs.validate.outputs.jobs, ',daymica-play,') }}
+    # Play Console 政策声明（相册/视频权限、广告 ID）会让 edits.commit 403。
+    # 侧载 APK 才是本 workflow 的发版门禁；Play AAB 失败不得拖红整次 Android。
+    continue-on-error: true
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:

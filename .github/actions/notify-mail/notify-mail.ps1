@@ -24,10 +24,63 @@
   465 走 TcpClient+SslStream 手写 SMTP；失败日志尾部经 gh api 拉取，拉不到自动跳过。
 #>
 
+function Get-CiNotifyAppFromRef {
+    param([string] $Ref = '')
+    $t = if ($null -eq $Ref) { '' } else { $Ref.Trim() }
+    if ($t.StartsWith('refs/tags/')) { $t = $t.Substring(10) }
+    elseif ($t.StartsWith('refs/heads/')) { return '' }
+    $slash = $t.IndexOf('/')
+    if ($slash -lt 1) { return '' }
+    return $t.Substring(0, $slash)
+}
+
+function Get-CiNotifySurface {
+    param([string] $Workflow = '')
+    $w = if ($null -eq $Workflow) { '' } else { $Workflow.ToLowerInvariant() }
+    if ($w -match 'android') { return 'Android' }
+    if ($w -match 'windows') { return 'Windows' }
+    if ($w -match 'website') { return '官网' }
+    if ($w -match 'backend|public-builder$') { return '后端/Web' }
+    if ($w -match 'workbuddy') { return 'workbuddy-tool' }
+    return $Workflow
+}
+
+function Test-CiNotifyMetaJob {
+    param([string] $Name)
+    $n = if ($null -eq $Name) { '' } else { $Name.ToLowerInvariant() }
+    return [bool]($n -match '^(validate|notify|release|create-github)')
+}
+
+function Select-CiNotifyJobResults {
+    param(
+        [hashtable] $JobResults = @{},
+        [string] $Result = ''
+    )
+    $out = [ordered]@{}
+    if (-not $JobResults -or $JobResults.Count -eq 0) { return $out }
+    foreach ($k in @($JobResults.Keys)) {
+        $v = [string]$JobResults[$k]
+        if ($v -in @('skipped', 'cancelled', '')) { continue }
+        if (Test-CiNotifyMetaJob $k) { continue }
+        if ($Result -eq 'failure') {
+            if ($v -eq 'failure') { $out[$k] = $v }
+        } else {
+            if ($v -eq 'success') { $out[$k] = $v }
+        }
+    }
+    if ($out.Count -eq 0 -and $Result -eq 'failure') {
+        foreach ($k in @($JobResults.Keys)) {
+            $v = [string]$JobResults[$k]
+            if ($v -eq 'failure') { $out[$k] = $v }
+        }
+    }
+    return $out
+}
+
 function New-CiNotifySubject {
     <#
     .SYNOPSIS
-      主题模板：`打包通知：{workflow} {成功|失败|跳过|取消} — {ref}`
+      主题模板：`打包通知：{app} {平台} {成功|失败} — {ref}`
     #>
     param(
         [Parameter(Mandatory = $true)][string] $Workflow,
@@ -41,14 +94,28 @@ function New-CiNotifySubject {
         'cancelled' { '取消' }
         default     { $Result }
     }
-    $refPart = if ($Ref) { " — $Ref" } else { '' }
-    return "打包通知：$Workflow $resultTxt$refPart"
+    $app = Get-CiNotifyAppFromRef $Ref
+    $surface = Get-CiNotifySurface $Workflow
+    $title = if ($app -and $surface -and $surface -ne $Workflow) {
+        "$app $surface"
+    } elseif ($app) {
+        $app
+    } elseif ($surface) {
+        $surface
+    } else {
+        $Workflow
+    }
+    $refShow = $Ref
+    if ($refShow.StartsWith('refs/tags/')) { $refShow = $refShow.Substring(10) }
+    elseif ($refShow.StartsWith('refs/heads/')) { $refShow = $refShow.Substring(11) }
+    $refPart = if ($refShow) { " — $refShow" } else { '' }
+    return "打包通知：$title $resultTxt$refPart"
 }
 
 function New-CiNotifyBody {
     <#
     .SYNOPSIS
-      正文模板：workflow / ref / 结论 / job 结论表 / 自定义备注 / run 链接 / 失败日志尾部。
+      正文模板：workflow / ref / 结论 / 实际构建的 job / 自定义备注 / run 链接 / 失败日志摘录。
     #>
     param(
         [Parameter(Mandatory = $true)][string] $Workflow,
@@ -57,17 +124,24 @@ function New-CiNotifyBody {
         [hashtable] $JobResults = @{},
         [string] $RunUrl = '',
         [string] $Note = '',
-        [int] $LogTailLines = 30
+        [int] $LogTailLines = 40
     )
     $sb = [System.Text.StringBuilder]::new()
+    $app = Get-CiNotifyAppFromRef $Ref
+    $surface = Get-CiNotifySurface $Workflow
+    if ($app) { $null = $sb.AppendLine("App: $app") }
+    if ($surface) { $null = $sb.AppendLine("平台: $surface") }
     $null = $sb.AppendLine("Workflow: $Workflow")
-    if ($Ref) { $null = $sb.AppendLine("Ref: $Ref") }
+    $refShow = $Ref
+    if ($refShow.StartsWith('refs/tags/')) { $refShow = $refShow.Substring(10) }
+    if ($refShow) { $null = $sb.AppendLine("Ref: $refShow") }
     $null = $sb.AppendLine("结论: $Result")
-    if ($JobResults.Count) {
+    $shown = Select-CiNotifyJobResults -JobResults $JobResults -Result $Result
+    if ($shown.Count) {
         $null = $sb.AppendLine('')
         $null = $sb.AppendLine('Jobs:')
-        foreach ($k in $JobResults.Keys) {
-            $null = $sb.AppendLine("  - $k : $($JobResults[$k])")
+        foreach ($k in $shown.Keys) {
+            $null = $sb.AppendLine("  - $k : $($shown[$k])")
         }
     }
     if ($Note) {
@@ -83,7 +157,7 @@ function New-CiNotifyBody {
             $tails = Get-CiFailedJobLogTails -LogTailLines $LogTailLines
             if ($tails) {
                 $null = $sb.AppendLine('')
-                $null = $sb.AppendLine('失败日志尾部：')
+                $null = $sb.AppendLine('失败报错：')
                 $null = $sb.AppendLine($tails)
             }
         } catch {
@@ -93,38 +167,90 @@ function New-CiNotifyBody {
     return $sb.ToString()
 }
 
+function Get-CiNotifyErrorExcerpt {
+    <#
+    .SYNOPSIS
+      从失败 job 日志里抽出真正的报错，丢掉 pub outdated / 依赖列表噪音。
+    #>
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string] $LogText,
+        [int] $MaxLines = 40
+    )
+    if ([string]::IsNullOrWhiteSpace($LogText)) { return $null }
+    $ansi = [regex]::new('\x1B\[[0-9;]*[A-Za-z]')
+    $rawLines = @($LogText -split "`r?`n" | ForEach-Object { $ansi.Replace($_, '') })
+    $noise = [regex]::new('(?i)(available\)|Downloading packages|Got dependencies|Changed \d+ dependency|pub outdated|tree-shaken|Checking the license|Installing CMake|Compressing:|Parsing \[Setup\])')
+    $keep = New-Object System.Collections.Generic.List[string]
+    foreach ($line in $rawLines) {
+        $t = $line.TrimEnd()
+        if ([string]::IsNullOrWhiteSpace($t)) { continue }
+        if ($noise.IsMatch($t)) { continue }
+        $keep.Add($t)
+    }
+    if ($keep.Count -eq 0) {
+        foreach ($line in $rawLines) { $keep.Add([string]$line) }
+    }
+    $idx = -1
+    for ($i = 0; $i -lt $keep.Count; $i++) {
+        if ($keep[$i] -match '(?i)(Register version|Invoke-RestMethod|##\[error\]|缺少必要参数|ERROR:|throw )') {
+            $idx = $i
+            break
+        }
+    }
+    if ($idx -ge 0) {
+        $from = [Math]::Max(0, $idx - 2)
+        $slice = @($keep[$from..($keep.Count - 1)])
+    } else {
+        $take = [Math]::Min($MaxLines, $keep.Count)
+        $start = [Math]::Max(0, $keep.Count - $take)
+        $slice = @($keep[$start..($keep.Count - 1)])
+    }
+    if ($slice.Count -gt $MaxLines) {
+        $slice = @($slice[($slice.Count - $MaxLines)..($slice.Count - 1)])
+    }
+    return ($slice -join "`n").Trim()
+}
+
 function Get-CiFailedJobLogTails {
     <#
     .SYNOPSIS
-      通过 gh api 拉取本次 run 中失败 job 的日志尾部（前 3 个失败 job）。
-      在非 GitHub Actions 环境或拉取失败时返回 $null（调用方忽略）。
+      拉取本次 run 中失败 job 的报错摘录。优先 gh run view --log-failed。
     #>
-    param([int] $LogTailLines = 30)
+    param([int] $LogTailLines = 40)
 
     $repo = $env:GITHUB_REPOSITORY
     $runId = $env:GITHUB_RUN_ID
     $token = $env:GITHUB_TOKEN
+    if (-not $token) { $token = $env:GH_TOKEN }
     if (-not $repo -or -not $runId -or -not $token) { return $null }
 
-    $jobsJson = gh api "repos/$repo/actions/runs/$runId/jobs" --jq '[.jobs[] | select(.conclusion == "failure") | {name, id}]' 2>$null
-    if (-not $jobsJson) { return $null }
-    $failed = $jobsJson | ConvertFrom-Json
-    if (-not $failed -or $failed.Count -eq 0) { return $null }
-    $failed = @($failed | Select-Object -First 3)
-
-    $sb = [System.Text.StringBuilder]::new()
-    foreach ($j in $failed) {
-        $log = gh api "repos/$repo/actions/jobs/$($j.id)/logs" 2>$null
-        if (-not $log) { continue }
-        $lines = @($log -split "`n")
-        $take = [Math]::Min($LogTailLines, $lines.Count)
-        $null = $sb.AppendLine("=== $($j.name)（尾部 $take 行）===")
-        $start = [Math]::Max(0, $lines.Count - $take)
-        $null = $sb.AppendLine(($lines[$start..($lines.Count - 1)] -join "`n"))
-        $null = $sb.AppendLine('')
+    $env:GH_PAGER = 'cat'
+    $log = $null
+    try {
+        $log = gh --no-pager run view $runId --repo $repo --log-failed 2>$null
+    } catch {
+        $log = $null
     }
-    if ($sb.Length -eq 0) { return $null }
-    return $sb.ToString()
+    if (-not $log) {
+        $jobsJson = gh --no-pager api "repos/$repo/actions/runs/$runId/jobs" --jq '[.jobs[] | select(.conclusion == "failure") | {name, id}]' 2>$null
+        if (-not $jobsJson) { return $null }
+        $failed = $jobsJson | ConvertFrom-Json
+        if (-not $failed -or $failed.Count -eq 0) { return $null }
+        $failed = @($failed | Select-Object -First 3)
+        $sb = [System.Text.StringBuilder]::new()
+        foreach ($j in $failed) {
+            $one = gh --no-pager api "repos/$repo/actions/jobs/$($j.id)/logs" 2>$null
+            if (-not $one) { continue }
+            $excerpt = Get-CiNotifyErrorExcerpt -LogText ($one | Out-String) -MaxLines $LogTailLines
+            if (-not $excerpt) { continue }
+            $null = $sb.AppendLine("=== $($j.name) ===")
+            $null = $sb.AppendLine($excerpt)
+            $null = $sb.AppendLine('')
+        }
+        if ($sb.Length -eq 0) { return $null }
+        return $sb.ToString()
+    }
+    return (Get-CiNotifyErrorExcerpt -LogText ($log | Out-String) -MaxLines $LogTailLines)
 }
 
 function ConvertTo-MimeHeader {
@@ -156,7 +282,7 @@ function ConvertTo-CiNotifyHtml {
 <html>
 <head><meta charset="UTF-8"></head>
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; padding: 40px 0;">
-  <div style="max-width: 480px; margin: 0 auto; background: #ffffff; border-radius: 16px; padding: 40px 32px;">
+  <div style="max-width: 720px; margin: 0 auto; background: #ffffff; border-radius: 16px; padding: 40px 32px;">
     <h2 style="color: #1a1a1a; margin: 0 0 16px; font-size: 22px;">$encTitle</h2>
     <div style="color: #444; font-size: 14px; line-height: 1.6;">$encBody</div>
   </div>

@@ -762,7 +762,7 @@ jobs:
             mailbox-android: ${{ needs.mailbox-android.result }}
             tokenboard-android: ${{ needs.tokenboard-android.result }}
             release: ${{ needs.release.result }}
-          note: ${{ contains(needs.*.result, 'failure') && 'Android 打包未全部成功，请打开 Run 查看失败 job。' || format('Android 打包已结束。jobs={0}', needs.validate.outputs.jobs) }}
+          note: ${{ contains(needs.*.result, 'failure') && '失败原因见下方报错。' || format('Android 打包已结束。jobs={0}', needs.validate.outputs.jobs) }}
           run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           auth_code: ${{ secrets.NOTIFY_MAIL_AUTH_CODE }}
           mail_from: ${{ secrets.NOTIFY_MAIL_FROM }}

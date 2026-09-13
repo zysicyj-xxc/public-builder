@@ -778,7 +778,7 @@ jobs:
             tokenboard-windows: ${{ needs.tokenboard-windows.result }}
             yaoxiaobai-windows: ${{ needs.yaoxiaobai-windows.result }}
             release: ${{ needs.release.result }}
-          note: ${{ contains(needs.*.result, 'failure') && 'Windows 打包未全部成功，请打开 Run 查看失败 job。' || format('Windows 打包已结束。jobs={0}', needs.validate.outputs.jobs) }}
+          note: ${{ contains(needs.*.result, 'failure') && '失败原因见下方报错。' || format('Windows 打包已结束。jobs={0}', needs.validate.outputs.jobs) }}
           run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           auth_code: ${{ secrets.NOTIFY_MAIL_AUTH_CODE }}
           mail_from: ${{ secrets.NOTIFY_MAIL_FROM }}

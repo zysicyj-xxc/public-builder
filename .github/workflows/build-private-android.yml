@@ -270,11 +270,14 @@ jobs:
             -ReleaseStatus completed
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: upload AAB artifact
+        # 政策声明（照片/视频权限核心功能）未提交时 edits.commit 会 403，AAB 构建本身是好的。
+        # 这里必须 always：把 AAB 留成产物，才能在 Play Console 手工建草稿把声明表单项逼出来。
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: daymica-play-aab-${{ needs.validate.outputs.daymica_version }}-${{ needs.validate.outputs.daymica_build }}
           path: apps/daymica/build/app/outputs/bundle/playRelease/app-play-release.aab
-          if-no-files-found: error
+          if-no-files-found: ignore
           retention-days: 30
 
   yaoxiaobai-android:

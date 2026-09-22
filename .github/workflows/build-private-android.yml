@@ -871,6 +871,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-darttool-yaoxiaobai-
       - name: build and upload Play
+        # 默认 draft：相册权限（READ_MEDIA_IMAGES）会让 edits.commit 在 completed 状态 403，
+        # draft 不触发该政策校验，AAB 可落库并在 Console 可见；声明补齐后一个 job 即可转 completed。
+        # 见 docs/play-store/release-policy.md。
         env:
           APP_VERSION: ${{ needs.validate.outputs.yaoxiaobai_version }}
           APP_BUILD: ${{ needs.validate.outputs.yaoxiaobai_build }}
@@ -884,7 +887,7 @@ jobs:
             -Version $env:APP_VERSION `
             -BuildNumber ([int]$env:APP_BUILD) `
             -Track internal `
-            -ReleaseStatus completed
+            -ReleaseStatus draft
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: upload AAB artifact
         # 政策声明未提交时 edits.commit 403，AAB 构建本身是好的。
@@ -946,6 +949,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-darttool-footprint-
       - name: build and upload Play
+        # 默认 draft：相册权限（READ_MEDIA_IMAGES）会让 edits.commit 在 completed 状态 403，
+        # draft 不触发该政策校验，AAB 可落库并在 Console 可见；声明补齐后一个 job 即可转 completed。
+        # 见 docs/play-store/release-policy.md。
         env:
           APP_VERSION: ${{ needs.validate.outputs.footprint_version }}
           APP_BUILD: ${{ needs.validate.outputs.footprint_build }}
@@ -959,7 +965,7 @@ jobs:
             -Version $env:APP_VERSION `
             -BuildNumber ([int]$env:APP_BUILD) `
             -Track internal `
-            -ReleaseStatus completed
+            -ReleaseStatus draft
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: upload AAB artifact
         # 政策声明未提交时 edits.commit 403，AAB 构建本身是好的。
@@ -1021,6 +1027,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-darttool-issueboard-
       - name: build and upload Play
+        # 默认 draft：相册权限（READ_MEDIA_IMAGES）会让 edits.commit 在 completed 状态 403，
+        # draft 不触发该政策校验，AAB 可落库并在 Console 可见；声明补齐后一个 job 即可转 completed。
+        # 见 docs/play-store/release-policy.md。
         env:
           APP_VERSION: ${{ needs.validate.outputs.newapp_version }}
           APP_BUILD: ${{ needs.validate.outputs.newapp_build }}
@@ -1034,7 +1043,7 @@ jobs:
             -Version $env:APP_VERSION `
             -BuildNumber ([int]$env:APP_BUILD) `
             -Track internal `
-            -ReleaseStatus completed
+            -ReleaseStatus draft
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: upload AAB artifact
         # 政策声明未提交时 edits.commit 403，AAB 构建本身是好的。
@@ -1096,6 +1105,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-darttool-mailbox-
       - name: build and upload Play
+        # 默认 draft：相册权限（READ_MEDIA_IMAGES）会让 edits.commit 在 completed 状态 403，
+        # draft 不触发该政策校验，AAB 可落库并在 Console 可见；声明补齐后一个 job 即可转 completed。
+        # 见 docs/play-store/release-policy.md。
         env:
           APP_VERSION: ${{ needs.validate.outputs.newapp_version }}
           APP_BUILD: ${{ needs.validate.outputs.newapp_build }}
@@ -1109,7 +1121,7 @@ jobs:
             -Version $env:APP_VERSION `
             -BuildNumber ([int]$env:APP_BUILD) `
             -Track internal `
-            -ReleaseStatus completed
+            -ReleaseStatus draft
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: upload AAB artifact
         # 政策声明未提交时 edits.commit 403，AAB 构建本身是好的。
@@ -1171,6 +1183,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-darttool-tokenboard-
       - name: build and upload Play
+        # 默认 draft：相册权限（READ_MEDIA_IMAGES）会让 edits.commit 在 completed 状态 403，
+        # draft 不触发该政策校验，AAB 可落库并在 Console 可见；声明补齐后一个 job 即可转 completed。
+        # 见 docs/play-store/release-policy.md。
         env:
           APP_VERSION: ${{ needs.validate.outputs.newapp_version }}
           APP_BUILD: ${{ needs.validate.outputs.newapp_build }}
@@ -1184,7 +1199,7 @@ jobs:
             -Version $env:APP_VERSION `
             -BuildNumber ([int]$env:APP_BUILD) `
             -Track internal `
-            -ReleaseStatus completed
+            -ReleaseStatus draft
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: upload AAB artifact
         # 政策声明未提交时 edits.commit 403，AAB 构建本身是好的。
@@ -1246,6 +1261,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-darttool-adminapp-
       - name: build and upload Play
+        # 默认 draft：相册权限（READ_MEDIA_IMAGES）会让 edits.commit 在 completed 状态 403，
+        # draft 不触发该政策校验，AAB 可落库并在 Console 可见；声明补齐后一个 job 即可转 completed。
+        # 见 docs/play-store/release-policy.md。
         env:
           APP_VERSION: ${{ needs.validate.outputs.newapp_version }}
           APP_BUILD: ${{ needs.validate.outputs.newapp_build }}
@@ -1259,7 +1277,7 @@ jobs:
             -Version $env:APP_VERSION `
             -BuildNumber ([int]$env:APP_BUILD) `
             -Track internal `
-            -ReleaseStatus completed
+            -ReleaseStatus draft
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: upload AAB artifact
         # 政策声明未提交时 edits.commit 403，AAB 构建本身是好的。

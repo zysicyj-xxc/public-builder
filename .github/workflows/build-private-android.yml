@@ -73,7 +73,7 @@ jobs:
           }
 
           # 三路 workflow 都会收到同一 dispatch；本路无对应 app 时 soft-skip，勿把整次 run 标红
-          $refPattern = '^refs/tags/(daymica|yaoxiaobai|footprint|backend|ai-usage|easy-shell|system-monitor|password-vault|clean-master|eye-care|issue-board|mail-box|token-board|admin-app)/(?:[0-9]{12}|[0-9]{4}\.[0-9]{1,2}\.[0-9]+-[0-9]+)$'
+          $refPattern = '^refs/tags/(daymica|yaoxiaobai|footprint|backend|ai-usage|easy-shell|system-monitor|password-vault|clean-master|eye-care|issue-board|mail-box|token-board|admin-app|water-tracker)/(?:[0-9]{12}|[0-9]{4}\.[0-9]{1,2}\.[0-9]+-[0-9]+)$'
           $rawRef = if ($null -eq $env:RAW_REF) { '' } else { $env:RAW_REF.Trim() }
           if ([string]::IsNullOrWhiteSpace($rawRef)) { throw 'ref is empty' }
           if ($rawRef -notmatch $refPattern) {
@@ -91,7 +91,8 @@ jobs:
             'aiusage-android', 'passwordvault-android', 'issueboard-android',
             'mailbox-android', 'tokenboard-android', 'adminapp-android',
             'yaoxiaobai-play', 'footprint-play', 'issueboard-play', 'mailbox-play',
-            'tokenboard-play', 'adminapp-play', 'passwordvault-play'
+            'tokenboard-play', 'adminapp-play', 'passwordvault-play',
+            'watertracker-android', 'watertracker-play'
           )
           $jobs = @()
           foreach ($j in ($env:RAW_JOBS -split ',')) {
@@ -1290,9 +1291,145 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
+  watertracker-android:
+    name: watertracker-android-arm64
+    needs: validate
+    if: ${{ contains(needs.validate.outputs.jobs, ',watertracker-android,') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.validate.outputs.ref }}
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.8'
+          channel: 'stable'
+          cache: true
+      - name: Cache shared Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: Linux-gradle-shared-v2
+          restore-keys: |
+            Linux-gradle-shared-
+      - name: Cache dart_tool
+        uses: actions/cache@v4
+        with:
+          path: |
+            apps/water-tracker/.dart_tool
+            apps/shared_package/.dart_tool
+          key: ${{ runner.os }}-darttool-watertracker-${{ hashFiles('apps/water-tracker/pubspec.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-darttool-watertracker-
+      - name: build
+        env:
+          APP_VERSION: ${{ needs.validate.outputs.newapp_version }}
+          APP_BUILD: ${{ needs.validate.outputs.newapp_build }}
+          DAYMICA_RELEASE_TOKEN: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
+          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+          DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+          WATERTRACKER_ANDROID_KEYSTORE_BASE64: ${{ secrets.WATERTRACKER_ANDROID_KEYSTORE_BASE64 }}
+          WATERTRACKER_STORE_PASSWORD: ${{ secrets.WATERTRACKER_STORE_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
+          & ./scripts/build-watertracker-android-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  watertracker-play:
+    name: watertracker-play-aab
+    needs: validate
+    if: ${{ contains(needs.validate.outputs.jobs, ',watertracker-play,') }}
+    # Play Console 政策声明未提交时，edits.commit 会 403。
+    # 侧载 APK 才是本 workflow 的发版门禁；Play AAB 失败不得拖红整次 Android。
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.validate.outputs.ref }}
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.8'
+          channel: 'stable'
+          cache: true
+      # 只 restore：与 watertracker-android 并行时不要抢写同一份 Gradle 缓存。
+      - name: Restore shared Gradle
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: Linux-gradle-shared-v2
+          restore-keys: |
+            Linux-gradle-shared-
+      - name: Cache dart_tool
+        uses: actions/cache@v4
+        with:
+          path: |
+            apps/water-tracker/.dart_tool
+            apps/shared_package/.dart_tool
+          key: ${{ runner.os }}-darttool-watertracker-${{ hashFiles('apps/water-tracker/pubspec.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-darttool-watertracker-
+      - name: build and upload Play
+        # 默认 draft：政策声明未补齐前 completed 状态会 403，draft 不触发该校验，
+        # AAB 可落库并在 Console 可见；声明补齐后一个 job 即可转 completed。
+        # 见 docs/play-store/release-policy.md。
+        env:
+          APP_VERSION: ${{ needs.validate.outputs.newapp_version }}
+          APP_BUILD: ${{ needs.validate.outputs.newapp_build }}
+          WATERTRACKER_ANDROID_KEYSTORE_BASE64: ${{ secrets.WATERTRACKER_ANDROID_KEYSTORE_BASE64 }}
+          WATERTRACKER_STORE_PASSWORD: ${{ secrets.WATERTRACKER_STORE_PASSWORD }}
+          PLAY_SERVICE_ACCOUNT_JSON_B64: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON_B64 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
+          & ./scripts/ci-watertracker-android-play-prod.ps1 `
+            -Version $env:APP_VERSION `
+            -BuildNumber ([int]$env:APP_BUILD) `
+            -Track internal `
+            -ReleaseStatus draft
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: upload AAB artifact
+        # 政策声明未提交时 edits.commit 403，AAB 构建本身是好的。
+        # 必须 always：把 AAB 留成产物，才能在 Play Console 手工建草稿把声明表单项逼出来。
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: watertracker-play-aab-${{ needs.validate.outputs.newapp_version }}-${{ needs.validate.outputs.newapp_build }}
+          path: apps/water-tracker/build/app/outputs/bundle/release/app-release.aab
+          if-no-files-found: ignore
+          retention-days: 30
+
   release:
     name: create-github-release
-    needs: [validate, daymica-android, daymica-play, yaoxiaobai-android, footprint-android, aiusage-android, passwordvault-android, issueboard-android, mailbox-android, tokenboard-android, adminapp-android]
+    needs: [validate, daymica-android, daymica-play, yaoxiaobai-android, footprint-android, aiusage-android, passwordvault-android, issueboard-android, mailbox-android, tokenboard-android, adminapp-android, watertracker-android]
     if: ${{ always() && needs.validate.result == 'success' && needs.validate.outputs.jobs != '' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -1338,7 +1475,7 @@ jobs:
   # 本平台全部 job（含 release）结束后发信。无 android jobs 时不发（validate 成功且 jobs 空）。
   notify:
     name: Notify mail
-    needs: [validate, daymica-android, daymica-play, yaoxiaobai-android, footprint-android, aiusage-android, passwordvault-android, issueboard-android, mailbox-android, tokenboard-android, adminapp-android, release]
+    needs: [validate, daymica-android, daymica-play, yaoxiaobai-android, footprint-android, aiusage-android, passwordvault-android, issueboard-android, mailbox-android, tokenboard-android, adminapp-android, watertracker-android, release]
     if: ${{ always() && (needs.validate.result == 'failure' || needs.validate.outputs.jobs != '') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -1368,6 +1505,7 @@ jobs:
             mailbox-android: ${{ needs.mailbox-android.result }}
             tokenboard-android: ${{ needs.tokenboard-android.result }}
             adminapp-android: ${{ needs.adminapp-android.result }}
+            watertracker-android: ${{ needs.watertracker-android.result }}
             release: ${{ needs.release.result }}
           note: ${{ contains(needs.*.result, 'failure') && '失败原因见下方报错。' || format('Android 打包已结束。jobs={0}', needs.validate.outputs.jobs) }}
           run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

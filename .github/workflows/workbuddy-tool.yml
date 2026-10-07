@@ -52,6 +52,9 @@ jobs:
       ref: ${{ steps.resolve.outputs.ref }}
       do_push: ${{ steps.flag.outputs.do_push }}
     steps:
+      - name: Checkout public-builder
+        uses: actions/checkout@v4
+
       - name: Allowlist ref/sha
         id: resolve
         uses: ./.github/actions/resolve-private-ref

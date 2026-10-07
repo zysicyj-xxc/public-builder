@@ -43,6 +43,9 @@ jobs:
       sha: ${{ steps.resolve.outputs.sha }}
       ref: ${{ steps.resolve.outputs.ref }}
     steps:
+      - name: Checkout public-builder
+        uses: actions/checkout@v4
+
       - name: Allowlist ref/sha
         id: resolve
         uses: ./.github/actions/resolve-private-ref

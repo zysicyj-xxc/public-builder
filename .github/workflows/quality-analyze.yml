@@ -1,0 +1,449 @@
+# Quality gates for private monorepo zysicyj-xxc/zysicyj (free public Actions minutes).
+# Trust boundary: repository_dispatch client_payload and workflow_dispatch inputs are untrusted.
+# Allowlist ref/sha before any API call. Status posts run in separate jobs so
+# PRIVATE_REPO_ACCESS_TOKEN is not on the runner that executes private-repo code.
+# Checkout, Flutter 3.44.8, and token handling follow build-private*.yml. Go is 1.26.6.
+# Shell is bash; release workflows use pwsh because their payloads are different.
+
+name: Quality Analyze
+
+on:
+  repository_dispatch:
+    types: [quality-analyze]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref or SHA of zysicyj-xxc/zysicyj'
+        required: true
+        type: string
+      sha:
+        description: 'Commit SHA for checkout and status (default: resolve ref)'
+        required: false
+        type: string
+      scopes:
+        description: 'Comma list: backend,website,flutter (empty = all)'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-analyze-${{ github.event.client_payload.sha || github.event.inputs.sha || github.event.client_payload.ref || github.event.inputs.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  meta:
+    name: resolve-payload
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      ref: ${{ steps.r.outputs.ref }}
+      sha: ${{ steps.r.outputs.sha }}
+      do_backend: ${{ steps.r.outputs.do_backend }}
+      do_website: ${{ steps.r.outputs.do_website }}
+      do_flutter: ${{ steps.r.outputs.do_flutter }}
+    steps:
+      - name: Resolve ref/sha/scopes
+        id: r
+        env:
+          RAW_REF: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
+          RAW_SHA: ${{ github.event.client_payload.sha || github.event.inputs.sha }}
+          RAW_SCOPES: ${{ github.event.client_payload.scopes || github.event.inputs.scopes }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          fail() { echo "ERROR: $*" >&2; exit 1; }
+
+          normalize_ref() {
+            local raw="$1"
+            if [ -z "$raw" ]; then
+              return 0
+            fi
+            if [ "${#raw}" -gt 200 ] || [ "$raw" != "${raw//[[:cntrl:]]/}" ]; then
+              fail "ref failed allowlist"
+            fi
+            raw="${raw#"${raw%%[! ]*}"}"
+            raw="${raw%"${raw##*[! ]}"}"
+            if [ -z "$raw" ]; then
+              return 0
+            fi
+            if printf '%s' "$raw" | grep -Eq '^[0-9a-fA-F]{40}$'; then
+              printf '%s' "$raw" | tr 'A-F' 'a-f'
+              return 0
+            fi
+            local full="$raw"
+            if ! printf '%s' "$full" | grep -Eq '^refs/'; then
+              if ! printf '%s' "$full" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/-]*$'; then
+                fail "ref failed allowlist: $full"
+              fi
+              full="refs/heads/$full"
+            fi
+            case "$full" in
+              *..*) fail "ref failed allowlist: $full" ;;
+            esac
+            if printf '%s' "$full" | grep -Eq '^refs/pull/[0-9]+/(head|merge)$'; then
+              printf '%s' "$full"
+              return 0
+            fi
+            local rest=""
+            if printf '%s' "$full" | grep -Eq '^refs/heads/.+'; then
+              rest=${full#refs/heads/}
+            elif printf '%s' "$full" | grep -Eq '^refs/tags/.+'; then
+              rest=${full#refs/tags/}
+            else
+              fail "ref failed allowlist: $full"
+            fi
+            local -a segs=()
+            IFS='/' read -r -a segs <<< "$rest"
+            local joined s
+            joined=$(IFS=/; printf '%s' "${segs[*]}")
+            if [ "$joined" != "$rest" ] || [ "${#segs[@]}" -eq 0 ]; then
+              fail "ref failed allowlist: $full"
+            fi
+            for s in "${segs[@]}"; do
+              if ! printf '%s' "$s" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'; then
+                fail "ref failed allowlist: $full"
+              fi
+            done
+            printf '%s' "$full"
+          }
+
+          normalize_sha() {
+            local raw="$1"
+            if [ -z "$raw" ]; then
+              return 0
+            fi
+            if [ "${#raw}" -gt 64 ] || [ "$raw" != "${raw//[[:cntrl:]]/}" ]; then
+              fail "sha failed allowlist"
+            fi
+            raw="${raw#"${raw%%[! ]*}"}"
+            raw="${raw%"${raw##*[! ]}"}"
+            raw=$(printf '%s' "$raw" | tr 'A-F' 'a-f')
+            if ! printf '%s' "$raw" | grep -Eq '^[0-9a-f]{40}$'; then
+              fail "sha failed allowlist"
+            fi
+            printf '%s' "$raw"
+          }
+
+          parse_scopes() {
+            local raw="${1:-}"
+            DO_B=false
+            DO_W=false
+            DO_F=false
+            if [ "${#raw}" -gt 64 ] || [ "$raw" != "${raw//[[:cntrl:]]/}" ]; then
+              fail "scopes failed allowlist"
+            fi
+            local scopes="${raw,,}"
+            scopes="${scopes//[[:space:]]/}"
+            if [ -z "$scopes" ]; then
+              DO_B=true
+              DO_W=true
+              DO_F=true
+              SCOPES_NORM=""
+              return 0
+            fi
+            if ! printf '%s' "$scopes" | grep -Eq '^[a-z,]+$'; then
+              fail "scopes failed allowlist"
+            fi
+            local -a parts=()
+            IFS=',' read -r -a parts <<< "$scopes"
+            local p any=false
+            for p in "${parts[@]}"; do
+              case "$p" in
+                '') ;;
+                backend) DO_B=true; any=true ;;
+                website) DO_W=true; any=true ;;
+                flutter) DO_F=true; any=true ;;
+                *) fail "unknown scope: $p" ;;
+              esac
+            done
+            if [ "$any" != true ]; then
+              fail "no scopes selected"
+            fi
+            SCOPES_NORM=$scopes
+          }
+
+          if [ -z "${GH_TOKEN:-}" ]; then
+            fail "PRIVATE_REPO_ACCESS_TOKEN is empty"
+          fi
+
+          REF_NORM=$(normalize_ref "${RAW_REF:-}")
+          SHA_NORM=$(normalize_sha "${RAW_SHA:-}")
+          parse_scopes "${RAW_SCOPES:-}"
+
+          if [ -n "$SHA_NORM" ]; then
+            TARGET=$SHA_NORM
+          elif [ -n "$REF_NORM" ]; then
+            TARGET=$REF_NORM
+          else
+            fail "ref or sha required"
+          fi
+          if ! printf '%s' "$TARGET" | grep -Eq '^[A-Za-z0-9._/-]+$'; then
+            fail "ref failed allowlist"
+          fi
+
+          # commits API peels annotated tags and accepts heads, tags, and refs/pull/N/{head,merge}.
+          SHA=$(gh api "repos/zysicyj-xxc/zysicyj/commits/${TARGET}" --jq .sha)
+          SHA=$(printf '%s' "$SHA" | tr 'A-F' 'a-f' | tr -d '[:space:]')
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            fail "could not resolve commit"
+          fi
+
+          {
+            echo "ref=${REF_NORM:-$SHA}"
+            echo "sha=$SHA"
+            echo "do_backend=$DO_B"
+            echo "do_website=$DO_W"
+            echo "do_flutter=$DO_F"
+          } >> "$GITHUB_OUTPUT"
+          echo "OK ref=${REF_NORM:-} sha=$SHA scopes=${SCOPES_NORM:-all} backend=$DO_B website=$DO_W flutter=$DO_F"
+
+      - name: Set pending statuses
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          SHA: ${{ steps.r.outputs.sha }}
+          DO_B: ${{ steps.r.outputs.do_backend }}
+          DO_W: ${{ steps.r.outputs.do_website }}
+          DO_F: ${{ steps.r.outputs.do_flutter }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "ERROR: sha failed allowlist" >&2
+            exit 1
+          fi
+          post() {
+            local ctx="$1"
+            gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
+              -f state="pending" \
+              -f target_url="${RUN_URL}" \
+              -f description="running on public-builder" \
+              -f context="${ctx}" >/dev/null
+          }
+          if [ "$DO_B" = "true" ]; then post "quality/backend"; fi
+          if [ "$DO_W" = "true" ]; then post "quality/website"; fi
+          if [ "$DO_F" = "true" ]; then post "quality/flutter-analyze"; fi
+
+  backend:
+    name: backend
+    needs: meta
+    if: ${{ needs.meta.outputs.do_backend == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.meta.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.6'
+          cache-dependency-path: backend/go.sum
+      - name: go build + test
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          go build ./...
+          go test ./... -count=1
+
+  website:
+    name: website
+    needs: meta
+    if: ${{ needs.meta.outputs.do_website == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.meta.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Enable pnpm
+        run: corepack enable
+      - name: pnpm install + vitest
+        working-directory: website
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+          pnpm exec vitest run
+
+  flutter:
+    name: flutter-analyze
+    needs: meta
+    if: ${{ needs.meta.outputs.do_flutter == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.meta.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.8'
+          channel: 'stable'
+          cache: true
+      - name: pub get + analyze
+        run: |
+          set -euo pipefail
+          # Former CNB validate-flutter apps, plus shared_package and admin-app.
+          # pub get is serial (shared_package first); analyze is parallel and does not re-run pub.
+          APPS=(
+            apps/shared_package
+            apps/daymica
+            apps/yaoxiaobai/yaoxiaobai_app
+            apps/footprint
+            apps/password-vault
+            apps/issue-board
+            apps/mail-box
+            apps/eye-care
+            apps/token-board
+            apps/admin-app
+          )
+          for d in "${APPS[@]}"; do
+            if [ ! -f "${d}/pubspec.yaml" ]; then
+              echo "SKIP pub get ${d}"
+              continue
+            fi
+            echo "== pub get ${d} =="
+            (cd "${d}" && flutter pub get)
+          done
+          FAIL=0
+          PIDS=()
+          for d in "${APPS[@]}"; do
+            if [ ! -f "${d}/pubspec.yaml" ]; then
+              continue
+            fi
+            (
+              set -euo pipefail
+              echo "== analyze ${d} =="
+              cd "${d}"
+              flutter analyze --no-pub --no-fatal-warnings --no-fatal-infos
+              echo "OK: ${d}"
+            ) &
+            PIDS+=("$!")
+          done
+          if [ "${#PIDS[@]}" -eq 0 ]; then
+            echo "ERROR: no Flutter packages found to analyze" >&2
+            exit 1
+          fi
+          for pid in "${PIDS[@]}"; do
+            if ! wait "${pid}"; then
+              FAIL=1
+            fi
+          done
+          if [ "${FAIL}" -ne 0 ]; then
+            echo "ERROR: at least one Flutter analyze failed" >&2
+            exit 1
+          fi
+
+  backend-status:
+    name: status backend
+    needs: [meta, backend]
+    if: ${{ always() && needs.meta.result == 'success' && needs.meta.outputs.do_backend == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Post quality/backend
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          SHA: ${{ needs.meta.outputs.sha }}
+          RESULT: ${{ needs.backend.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "ERROR: sha failed allowlist" >&2
+            exit 1
+          fi
+          case "$RESULT" in
+            success) STATE=success; DESC="backend success" ;;
+            cancelled) STATE=failure; DESC="backend cancelled" ;;
+            *) STATE=failure; DESC="backend failure" ;;
+          esac
+          echo "quality/backend $STATE result=$RESULT"
+          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
+            -f state="$STATE" \
+            -f target_url="${RUN_URL}" \
+            -f description="${DESC}" \
+            -f context="quality/backend" >/dev/null
+
+  website-status:
+    name: status website
+    needs: [meta, website]
+    if: ${{ always() && needs.meta.result == 'success' && needs.meta.outputs.do_website == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Post quality/website
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          SHA: ${{ needs.meta.outputs.sha }}
+          RESULT: ${{ needs.website.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "ERROR: sha failed allowlist" >&2
+            exit 1
+          fi
+          case "$RESULT" in
+            success) STATE=success; DESC="website success" ;;
+            cancelled) STATE=failure; DESC="website cancelled" ;;
+            *) STATE=failure; DESC="website failure" ;;
+          esac
+          echo "quality/website $STATE result=$RESULT"
+          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
+            -f state="$STATE" \
+            -f target_url="${RUN_URL}" \
+            -f description="${DESC}" \
+            -f context="quality/website" >/dev/null
+
+  flutter-status:
+    name: status flutter-analyze
+    needs: [meta, flutter]
+    if: ${{ always() && needs.meta.result == 'success' && needs.meta.outputs.do_flutter == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Post quality/flutter-analyze
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          SHA: ${{ needs.meta.outputs.sha }}
+          RESULT: ${{ needs.flutter.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "ERROR: sha failed allowlist" >&2
+            exit 1
+          fi
+          case "$RESULT" in
+            success) STATE=success; DESC="flutter-analyze success" ;;
+            cancelled) STATE=failure; DESC="flutter-analyze cancelled" ;;
+            *) STATE=failure; DESC="flutter-analyze failure" ;;
+          esac
+          echo "quality/flutter-analyze $STATE result=$RESULT"
+          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
+            -f state="$STATE" \
+            -f target_url="${RUN_URL}" \
+            -f description="${DESC}" \
+            -f context="quality/flutter-analyze" >/dev/null

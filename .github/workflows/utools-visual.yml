@@ -1,0 +1,259 @@
+# uTools visual gate for zysicyj-xxc/zysicyj.
+# Trust boundary: repository_dispatch client_payload and workflow_dispatch inputs are untrusted.
+# Allowlist ref/sha before any API call. Status posts run in a separate job so
+# PRIVATE_REPO_ACCESS_TOKEN is not on the runner that executes private-repo code.
+#
+# Contexts: export-diff, and gate (<plugin>) for easy-script, bookmark-collector,
+# blog-sync, daymica-capture.
+# export-diff regenerates canonical tokens (ADR 0006 export_web_tokens via the
+# flutter test, not bare dart run) and fails if generated/ or utools/ drifts.
+# gate (<plugin>) runs pnpm test, the command used by the private utools-test workflow.
+# Node 22, Flutter 3.44.8.
+
+name: uTools Visual
+
+on:
+  repository_dispatch:
+    types: [utools-visual]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref or SHA of zysicyj-xxc/zysicyj'
+        required: true
+        type: string
+      sha:
+        description: 'Commit SHA for checkout and status (default: resolve ref)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: utools-visual-${{ github.event.client_payload.sha || github.event.inputs.sha || github.event.client_payload.ref || github.event.inputs.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  meta:
+    name: resolve-payload
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      ref: ${{ steps.resolve.outputs.ref }}
+    steps:
+      - name: Allowlist ref/sha
+        id: resolve
+        uses: ./.github/actions/resolve-private-ref
+        with:
+          ref: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
+          sha: ${{ github.event.client_payload.sha || github.event.inputs.sha }}
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+
+      - name: Set pending statuses
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "ERROR: sha failed allowlist" >&2
+            exit 1
+          fi
+          post() {
+            gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
+              -f state="pending" \
+              -f target_url="${RUN_URL}" \
+              -f description="running on public-builder" \
+              -f context="$1" >/dev/null
+          }
+          post "export-diff"
+          post "gate (easy-script)"
+          post "gate (bookmark-collector)"
+          post "gate (blog-sync)"
+          post "gate (daymica-capture)"
+
+      - name: Post failure when resolve fails
+        if: failure()
+        env:
+          RESOLVED_SHA: ${{ steps.resolve.outputs.sha }}
+          RAW_SHA: ${{ github.event.client_payload.sha || github.event.inputs.sha }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          sha=$(printf '%s' "${RESOLVED_SHA:-}" | tr 'A-F' 'a-f' | tr -d '[:space:]')
+          if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
+            sha=$(printf '%s' "${RAW_SHA:-}" | tr 'A-F' 'a-f' | tr -d '[:space:]')
+          fi
+          if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "no allowlisted sha; dispatcher pending left in place"
+            exit 0
+          fi
+          for ctx in \
+            "export-diff" \
+            "gate (easy-script)" \
+            "gate (bookmark-collector)" \
+            "gate (blog-sync)" \
+            "gate (daymica-capture)"
+          do
+            gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${sha}" \
+              -f state="failure" \
+              -f target_url="${RUN_URL}" \
+              -f description="payload rejected" \
+              -f context="${ctx}" >/dev/null
+          done
+
+  export-diff:
+    name: export-diff
+    needs: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.meta.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.8'
+          channel: 'stable'
+          cache: true
+      - name: regenerate tokens and diff utools
+        run: |
+          set -euo pipefail
+          cd apps/shared_package
+          flutter pub get
+          flutter test test/tokens/web_token_export_test.dart
+          cd ../..
+          git diff --exit-code -- apps/shared_package/generated utools
+
+  gate:
+    name: gate (${{ matrix.plugin }})
+    needs: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin:
+          - easy-script
+          - bookmark-collector
+          - blog-sync
+          - daymica-capture
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.meta.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: pnpm test
+        env:
+          PLUGIN: ${{ matrix.plugin }}
+        run: |
+          set -euo pipefail
+          case "$PLUGIN" in
+            easy-script|bookmark-collector|blog-sync|daymica-capture) ;;
+            *) echo "ERROR: plugin not allowlisted" >&2; exit 1 ;;
+          esac
+          dir="utools/${PLUGIN}"
+          if [ ! -f "${dir}/package.json" ]; then
+            echo "ERROR: missing ${dir}/package.json" >&2
+            exit 1
+          fi
+          corepack enable
+          if [ -f "${dir}/pnpm-lock.yaml" ]; then
+            cd "${dir}"
+            pnpm install --frozen-lockfile
+            pnpm test
+          elif [ -f utools/pnpm-lock.yaml ]; then
+            pnpm install --frozen-lockfile --dir utools
+            pnpm --dir "${dir}" test
+          else
+            echo "ERROR: no pnpm-lock.yaml for ${dir}" >&2
+            exit 1
+          fi
+
+  report:
+    name: post-statuses
+    needs: [meta, export-diff, gate]
+    if: always() && needs.meta.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Post conclusions
+        env:
+          SHA: ${{ needs.meta.outputs.sha }}
+          ACTIONS_TOKEN: ${{ github.token }}
+          STATUS_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "ERROR: sha failed allowlist" >&2
+            exit 1
+          fi
+          declare -A conc=()
+          contexts=(
+            "export-diff"
+            "gate (easy-script)"
+            "gate (bookmark-collector)"
+            "gate (blog-sync)"
+            "gate (daymica-capture)"
+          )
+          for attempt in 1 2 3 4 5 6; do
+            conc=()
+            while IFS=$'\t' read -r name conclusion; do
+              [ -n "$name" ] || continue
+              conc["$name"]=$conclusion
+            done < <(GH_TOKEN="$ACTIONS_TOKEN" gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/jobs?per_page=100" \
+              --jq '.jobs[] | [.name, (.conclusion // "")] | @tsv')
+            missing=0
+            for ctx in "${contexts[@]}"; do
+              if [ -z "${conc[$ctx]:-}" ]; then
+                missing=1
+                echo "waiting for ${ctx} (attempt ${attempt})"
+              fi
+            done
+            if [ "$missing" -eq 0 ]; then
+              break
+            fi
+            sleep 5
+          done
+          for name in "${!conc[@]}"; do
+            echo "job ${name} => ${conc[$name]}"
+          done
+          post() {
+            local ctx="$1" conclusion="${2:-}" state desc
+            case "$conclusion" in
+              success) state=success; desc=success ;;
+              cancelled) state=failure; desc=cancelled ;;
+              *) state=failure; desc=failure ;;
+            esac
+            echo "status ${ctx} ${state}"
+            GH_TOKEN="$STATUS_TOKEN" gh api --method POST \
+              "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
+              -f state="$state" \
+              -f target_url="${RUN_URL}" \
+              -f description="$desc" \
+              -f context="$ctx" >/dev/null
+          }
+          for ctx in "${contexts[@]}"; do
+            post "$ctx" "${conc[$ctx]:-}"
+          done

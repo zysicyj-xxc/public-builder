@@ -1,0 +1,267 @@
+# workbuddy-tool build check for zysicyj-xxc/zysicyj.
+# Trust boundary: repository_dispatch client_payload and workflow_dispatch inputs are untrusted.
+# Allowlist ref/sha before any API call. do_docker_push must be true or false.
+# Status posts run in a separate job so PRIVATE_REPO_ACCESS_TOKEN is not on the
+# runner that executes private-repo code.
+#
+# build-check always runs: docker build the single Dockerfile under
+# utools/workbuddy-tool, or the frontend production build when no Dockerfile exists.
+# push-dockerhub is posted only when do_docker_push is true. This repo has no
+# Docker Hub credential wired in any workflow, so the push job fails closed and
+# does not invent secret names.
+
+name: Workbuddy Tool
+
+on:
+  repository_dispatch:
+    types: [workbuddy-tool]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref or SHA of zysicyj-xxc/zysicyj'
+        required: true
+        type: string
+      sha:
+        description: 'Commit SHA for checkout and status (default: resolve ref)'
+        required: false
+        type: string
+      do_docker_push:
+        description: 'Also request the push-dockerhub status'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: workbuddy-tool-${{ github.event.client_payload.sha || github.event.inputs.sha || github.event.client_payload.ref || github.event.inputs.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  meta:
+    name: resolve-payload
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      ref: ${{ steps.resolve.outputs.ref }}
+      do_push: ${{ steps.flag.outputs.do_push }}
+    steps:
+      - name: Allowlist ref/sha
+        id: resolve
+        uses: ./.github/actions/resolve-private-ref
+        with:
+          ref: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
+          sha: ${{ github.event.client_payload.sha || github.event.inputs.sha }}
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+
+      - name: Allowlist do_docker_push
+        id: flag
+        env:
+          FROM_PAYLOAD: ${{ github.event.client_payload.do_docker_push }}
+          FROM_INPUT: ${{ github.event.inputs.do_docker_push }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            raw="${FROM_INPUT:-}"
+          else
+            raw="${FROM_PAYLOAD:-}"
+          fi
+          case "$raw" in
+            ''|false) echo "do_push=false" >> "$GITHUB_OUTPUT" ;;
+            true) echo "do_push=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "ERROR: do_docker_push failed allowlist" >&2; exit 1 ;;
+          esac
+
+      - name: Set pending statuses
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+          DO_PUSH: ${{ steps.flag.outputs.do_push }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "ERROR: sha failed allowlist" >&2
+            exit 1
+          fi
+          case "$DO_PUSH" in
+            true|false) ;;
+            *) echo "ERROR: do_docker_push failed allowlist" >&2; exit 1 ;;
+          esac
+          post() {
+            gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
+              -f state="pending" \
+              -f target_url="${RUN_URL}" \
+              -f description="running on public-builder" \
+              -f context="$1" >/dev/null
+          }
+          post "build-check"
+          if [ "$DO_PUSH" = "true" ]; then
+            post "push-dockerhub"
+          fi
+
+      - name: Post failure when resolve fails
+        if: failure()
+        env:
+          RESOLVED_SHA: ${{ steps.resolve.outputs.sha }}
+          RAW_SHA: ${{ github.event.client_payload.sha || github.event.inputs.sha }}
+          FROM_PAYLOAD: ${{ github.event.client_payload.do_docker_push }}
+          FROM_INPUT: ${{ github.event.inputs.do_docker_push }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          sha=$(printf '%s' "${RESOLVED_SHA:-}" | tr 'A-F' 'a-f' | tr -d '[:space:]')
+          if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
+            sha=$(printf '%s' "${RAW_SHA:-}" | tr 'A-F' 'a-f' | tr -d '[:space:]')
+          fi
+          if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "no allowlisted sha; dispatcher pending left in place"
+            exit 0
+          fi
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            raw_push="${FROM_INPUT:-}"
+          else
+            raw_push="${FROM_PAYLOAD:-}"
+          fi
+          post() {
+            gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${sha}" \
+              -f state="failure" \
+              -f target_url="${RUN_URL}" \
+              -f description="payload rejected" \
+              -f context="$1" >/dev/null
+          }
+          post "build-check"
+          case "$raw_push" in
+            true) post "push-dockerhub" ;;
+          esac
+
+  build-check:
+    name: build-check
+    needs: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.meta.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: docker build or frontend build
+        env:
+          SHA: ${{ needs.meta.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "ERROR: sha failed allowlist" >&2
+            exit 1
+          fi
+          root=utools/workbuddy-tool
+          if [ ! -d "$root" ]; then
+            echo "ERROR: missing ${root}" >&2
+            exit 1
+          fi
+          mapfile -t dfs < <(find "$root" -name Dockerfile -not -path '*/node_modules/*' | sort)
+          if [ "${#dfs[@]}" -eq 0 ]; then
+            front="${root}/frontend"
+            if [ ! -f "${front}/package.json" ]; then
+              echo "ERROR: no Dockerfile and no ${front}/package.json" >&2
+              exit 1
+            fi
+            cd "${front}"
+            corepack enable
+            if [ -f pnpm-lock.yaml ]; then
+              pnpm install --frozen-lockfile
+              pnpm run build
+            elif [ -f package-lock.json ]; then
+              npm ci
+              npm run build
+            else
+              echo "ERROR: no lockfile in ${front}" >&2
+              exit 1
+            fi
+            exit 0
+          fi
+          if [ "${#dfs[@]}" -ne 1 ]; then
+            echo "ERROR: expected one Dockerfile, found ${#dfs[@]}" >&2
+            printf '%s\n' "${dfs[@]}" >&2
+            exit 1
+          fi
+          df="${dfs[0]}"
+          ctx=$(dirname "$df")
+          echo "docker build -f ${df} ${ctx}"
+          docker build -f "$df" -t "workbuddy-tool:${SHA}" "$ctx"
+
+  push-dockerhub:
+    name: push-dockerhub
+    needs: [meta, build-check]
+    if: always() && needs.meta.result == 'success' && needs.meta.outputs.do_push == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require a successful build-check
+        if: needs['build-check'].result != 'success'
+        run: |
+          echo "build-check result: ${{ needs['build-check'].result }}"
+          exit 1
+      - name: Docker Hub credentials are not configured
+        if: needs['build-check'].result == 'success'
+        run: |
+          echo "public-builder workflows do not reference a Docker Hub credential."
+          echo "build-check does not push. Not inventing secret names."
+          exit 1
+
+  report:
+    name: post-statuses
+    needs: [meta, build-check, push-dockerhub]
+    if: always() && needs.meta.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Post conclusions
+        env:
+          SHA: ${{ needs.meta.outputs.sha }}
+          DO_PUSH: ${{ needs.meta.outputs.do_push }}
+          BUILD: ${{ needs['build-check'].result }}
+          PUSH: ${{ needs['push-dockerhub'].result }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "ERROR: sha failed allowlist" >&2
+            exit 1
+          fi
+          case "$DO_PUSH" in
+            true|false) ;;
+            *) echo "ERROR: do_docker_push failed allowlist" >&2; exit 1 ;;
+          esac
+          post() {
+            local ctx="$1" result="$2" state desc
+            case "$result" in
+              success) state=success; desc=success ;;
+              cancelled) state=failure; desc=cancelled ;;
+              *) state=failure; desc=failure ;;
+            esac
+            echo "status ${ctx} ${state}"
+            gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
+              -f state="$state" \
+              -f target_url="${RUN_URL}" \
+              -f description="$desc" \
+              -f context="$ctx" >/dev/null
+          }
+          post build-check "$BUILD"
+          if [ "$DO_PUSH" = "true" ]; then
+            post push-dockerhub "$PUSH"
+          fi

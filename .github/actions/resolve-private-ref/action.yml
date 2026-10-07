@@ -1,0 +1,37 @@
+name: Resolve private ref
+description: >
+  Allowlist an untrusted ref/sha and resolve a commit SHA on zysicyj-xxc/zysicyj.
+  client_payload and workflow_dispatch inputs are untrusted.
+
+inputs:
+  ref:
+    description: Untrusted git ref
+    required: false
+    default: ''
+  sha:
+    description: Untrusted commit SHA
+    required: false
+    default: ''
+  token:
+    description: Token with contents read and statuses write on the private repo
+    required: true
+
+outputs:
+  ref:
+    description: Allowlisted ref, or the resolved SHA when ref was empty
+    value: ${{ steps.r.outputs.ref }}
+  sha:
+    description: Resolved 40-hex commit SHA
+    value: ${{ steps.r.outputs.sha }}
+
+runs:
+  using: composite
+  steps:
+    - name: Allowlist ref/sha and resolve commit
+      id: r
+      shell: bash
+      env:
+        RAW_REF: ${{ inputs.ref }}
+        RAW_SHA: ${{ inputs.sha }}
+        GH_TOKEN: ${{ inputs.token }}
+      run: bash "$GITHUB_ACTION_PATH/resolve.sh"

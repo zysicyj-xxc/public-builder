@@ -1,0 +1,237 @@
+# Web visual gate for zysicyj-xxc/zysicyj (ADR 0006).
+# Trust boundary: repository_dispatch client_payload and workflow_dispatch inputs are untrusted.
+# Allowlist ref/sha before any API call. Status posts run in a separate job so
+# PRIVATE_REPO_ACCESS_TOKEN is not on the runner that executes private-repo code.
+#
+# Contexts are exactly: tokens, web-shared, website.
+# tokens: flutter test apps/shared_package/test/tokens/web_token_export_test.dart
+#   (writes via export_web_tokens.dart; bare dart run crashes on dart:ui), then
+#   git diff --exit-code on the canonical outputs.
+# web-shared: pnpm test in apps/web_shared (root workspace if that is where the lockfile is).
+# website: pnpm test + pnpm run lint:visual (the pre-deploy gate).
+# Flutter 3.44.8, Node 22, same as the other public-builder workflows.
+
+name: Web Visual
+
+on:
+  repository_dispatch:
+    types: [web-visual]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref or SHA of zysicyj-xxc/zysicyj'
+        required: true
+        type: string
+      sha:
+        description: 'Commit SHA for checkout and status (default: resolve ref)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-visual-${{ github.event.client_payload.sha || github.event.inputs.sha || github.event.client_payload.ref || github.event.inputs.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  meta:
+    name: resolve-payload
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      ref: ${{ steps.resolve.outputs.ref }}
+    steps:
+      - name: Allowlist ref/sha
+        id: resolve
+        uses: ./.github/actions/resolve-private-ref
+        with:
+          ref: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
+          sha: ${{ github.event.client_payload.sha || github.event.inputs.sha }}
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+
+      - name: Set pending statuses
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "ERROR: sha failed allowlist" >&2
+            exit 1
+          fi
+          post() {
+            gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
+              -f state="pending" \
+              -f target_url="${RUN_URL}" \
+              -f description="running on public-builder" \
+              -f context="$1" >/dev/null
+          }
+          post "tokens"
+          post "web-shared"
+          post "website"
+
+      - name: Post failure when resolve fails
+        if: failure()
+        env:
+          RESOLVED_SHA: ${{ steps.resolve.outputs.sha }}
+          RAW_SHA: ${{ github.event.client_payload.sha || github.event.inputs.sha }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          sha=$(printf '%s' "${RESOLVED_SHA:-}" | tr 'A-F' 'a-f' | tr -d '[:space:]')
+          if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
+            sha=$(printf '%s' "${RAW_SHA:-}" | tr 'A-F' 'a-f' | tr -d '[:space:]')
+          fi
+          if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "no allowlisted sha; dispatcher pending left in place"
+            exit 0
+          fi
+          for ctx in tokens web-shared website; do
+            gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${sha}" \
+              -f state="failure" \
+              -f target_url="${RUN_URL}" \
+              -f description="payload rejected" \
+              -f context="${ctx}" >/dev/null
+          done
+
+  tokens:
+    name: tokens
+    needs: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.meta.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.8'
+          channel: 'stable'
+          cache: true
+      - name: export tokens and diff
+        run: |
+          set -euo pipefail
+          cd apps/shared_package
+          flutter pub get
+          flutter test test/tokens/web_token_export_test.dart
+          cd ../..
+          git diff --exit-code -- \
+            apps/shared_package/generated \
+            backend/internal/handler/oauth_tokens.css
+
+  web-shared:
+    name: web-shared
+    needs: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.meta.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: test @zysicyj/web-shared
+        run: |
+          set -euo pipefail
+          if [ ! -f apps/web_shared/package.json ]; then
+            echo "ERROR: missing apps/web_shared/package.json" >&2
+            exit 1
+          fi
+          corepack enable
+          if [ -f apps/web_shared/pnpm-lock.yaml ]; then
+            cd apps/web_shared
+            pnpm install --frozen-lockfile
+            pnpm test
+          elif [ -f pnpm-lock.yaml ]; then
+            pnpm install --frozen-lockfile
+            pnpm --dir apps/web_shared test
+          else
+            echo "ERROR: no pnpm-lock.yaml for apps/web_shared" >&2
+            exit 1
+          fi
+
+  website:
+    name: website
+    needs: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.meta.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: test and lint:visual
+        run: |
+          set -euo pipefail
+          cd website
+          if [ ! -f pnpm-lock.yaml ]; then
+            echo "ERROR: missing website/pnpm-lock.yaml" >&2
+            exit 1
+          fi
+          corepack enable
+          pnpm install --frozen-lockfile
+          node -e 'const s=require("./package.json").scripts||{}; if(!s["lint:visual"]) { console.error("missing lint:visual"); process.exit(1); }'
+          pnpm test
+          pnpm run lint:visual
+
+  report:
+    name: post-statuses
+    needs: [meta, tokens, web-shared, website]
+    if: always() && needs.meta.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Post conclusions
+        env:
+          SHA: ${{ needs.meta.outputs.sha }}
+          TOKENS: ${{ needs.tokens.result }}
+          WEB_SHARED: ${{ needs['web-shared'].result }}
+          WEBSITE: ${{ needs.website.result }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "ERROR: sha failed allowlist" >&2
+            exit 1
+          fi
+          post() {
+            local ctx="$1" result="$2" state desc
+            case "$result" in
+              success) state=success; desc=success ;;
+              cancelled) state=failure; desc=cancelled ;;
+              *) state=failure; desc=failure ;;
+            esac
+            echo "status ${ctx} ${state}"
+            gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
+              -f state="$state" \
+              -f target_url="${RUN_URL}" \
+              -f description="$desc" \
+              -f context="$ctx" >/dev/null
+          }
+          post tokens "$TOKENS"
+          post web-shared "$WEB_SHARED"
+          post website "$WEBSITE"

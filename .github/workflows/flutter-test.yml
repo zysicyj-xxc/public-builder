@@ -15,7 +15,6 @@
 name: Flutter Test
 
 on:
-  pull_request:
   repository_dispatch:
     types: [visual-lint]
   workflow_dispatch:
@@ -59,8 +58,8 @@ jobs:
         id: resolve
         uses: ./.github/actions/resolve-private-ref
         with:
-          ref: ${{ github.event_name == 'pull_request' && 'refs/pull/135/merge' || github.event.client_payload.ref || github.event.inputs.ref }}
-          sha: ${{ github.event_name == 'pull_request' && '09198dc916134672953f768d14e4bf28cb1d3ff1' || github.event.client_payload.sha || github.event.inputs.sha }}
+          ref: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
+          sha: ${{ github.event.client_payload.sha || github.event.inputs.sha }}
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
 
       - name: Decide from private diff

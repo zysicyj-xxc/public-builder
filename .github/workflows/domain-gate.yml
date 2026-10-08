@@ -10,7 +10,6 @@
 name: Domain Gate
 
 on:
-  pull_request:
   repository_dispatch:
     types: [domain-gate]
   workflow_dispatch:
@@ -38,7 +37,6 @@ defaults:
 jobs:
   meta:
     name: resolve-payload
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -99,7 +97,6 @@ jobs:
   verify:
     name: assert domain registry
     needs: meta
-    if: always() && (needs.meta.result == 'success' || github.event_name == 'pull_request')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -107,8 +104,7 @@ jobs:
         with:
           repository: zysicyj-xxc/zysicyj
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          # ponytail: pull_request ref fallback is only for the verification run; drop it with the pull_request trigger.
-          ref: ${{ needs.meta.outputs.sha || 'main' }}
+          ref: ${{ needs.meta.outputs.sha }}
           persist-credentials: false
           fetch-depth: 1
       - name: assert domain registry

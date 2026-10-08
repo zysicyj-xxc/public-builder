@@ -4,14 +4,15 @@
 # PRIVATE_REPO_ACCESS_TOKEN and persist-credentials: false.
 # Signing secrets are STAGING_ANDROID_* only. Missing staging keystore falls
 # back to the Android debug certificate inside the private staging script.
-# upload defaults to false. RustFS layout is not confirmed, and the staging
-# scripts themselves do not upload or register a version.
+# 这个工作流不上传。以后真要上传测试包，存在哪、用什么凭据另外出方案，
+# 先和 .1 系统盘专家对好，再报用户。
 # This workflow does not create tags, GitHub Releases, or CNB builds.
 # repository_dispatch type is staging-build (not the production trigger-build).
 
 name: Staging Builds
 
 on:
+  pull_request:
   workflow_dispatch:
     inputs:
       app:
@@ -30,11 +31,6 @@ on:
         description: 'Commit SHA (optional; wins over ref)'
         required: false
         type: string
-      upload:
-        description: 'Upload to RustFS public/releases-staging/<app>/'
-        required: false
-        default: false
-        type: boolean
   repository_dispatch:
     types: [staging-build]
 
@@ -57,7 +53,6 @@ jobs:
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
       ref: ${{ steps.resolve.outputs.ref }}
-      upload: ${{ steps.norm.outputs.upload }}
       apps: ${{ steps.norm.outputs.apps }}
     steps:
       - name: Checkout public-builder
@@ -85,6 +80,12 @@ jobs:
             echo "production keystore secret name in workflow" >&2
             exit 1
           fi
+          # Prefix assembled at runtime so this file does not contain the name.
+          rf=$(printf '%s%s_' 'RUST' 'FS')
+          if grep -nE -- "${rf}(ACCESS|SECRET)" "$file"; then
+            echo "object-store credential name in workflow" >&2
+            exit 1
+          fi
           python3 - "$file" <<'PY'
           import re, sys
           text = open(sys.argv[1], encoding="utf-8").read()
@@ -94,8 +95,6 @@ jobs:
               "STAGING_ANDROID_KEYSTORE_PASSWORD",
               "STAGING_ANDROID_KEY_ALIAS",
               "STAGING_ANDROID_KEY_PASSWORD",
-              "DAYMICA_RUSTFS_ACCESS_KEY",
-              "DAYMICA_RUSTFS_SECRET_KEY",
           }
           bad = []
           for match in re.finditer(r"secrets\.([A-Z0-9_]+)", text):
@@ -114,21 +113,17 @@ jobs:
         shell: bash
         env:
           RAW_APP: ${{ github.event.inputs.app || github.event.client_payload.app }}
-          RAW_UPLOAD: ${{ github.event.inputs.upload || github.event.client_payload.upload }}
         run: |
           set -euo pipefail
-          upload="${RAW_UPLOAD:-}"
           app="${RAW_APP:-}"
           case "$GITHUB_EVENT_NAME" in
+            pull_request)
+              echo "apps=,daymica,password-vault," >> "$GITHUB_OUTPUT"
+              ;;
             workflow_dispatch|repository_dispatch)
               case "$app" in
                 daymica|password-vault) ;;
                 *) echo "app failed allowlist" >&2; exit 1 ;;
-              esac
-              case "$upload" in
-                true|false) ;;
-                "") upload=false ;;
-                *) echo "upload failed allowlist" >&2; exit 1 ;;
               esac
               echo "apps=,$app," >> "$GITHUB_OUTPUT"
               ;;
@@ -137,14 +132,13 @@ jobs:
               exit 1
               ;;
           esac
-          echo "upload=$upload" >> "$GITHUB_OUTPUT"
 
       - name: Allowlist ref/sha
         id: resolve
         uses: ./.github/actions/resolve-private-ref
         with:
-          ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
-          sha: ${{ github.event.inputs.sha || github.event.client_payload.sha }}
+          ref: ${{ github.event_name == 'pull_request' && 'main' || github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+          sha: ${{ github.event_name != 'pull_request' && (github.event.inputs.sha || github.event.client_payload.sha) || '' }}
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
 
   android:
@@ -152,9 +146,6 @@ jobs:
     needs: guard
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    permissions:
-      contents: read
-      actions: write
     strategy:
       fail-fast: false
       matrix:
@@ -231,7 +222,6 @@ jobs:
         env:
           APP_SLUG: ${{ matrix.app }}
           RESOLVED_SHA: ${{ needs.guard.outputs.sha }}
-          STAGING_UPLOAD: ${{ needs.guard.outputs.upload }}
         run: |
           $ErrorActionPreference = 'Stop'
           $app = $env:APP_SLUG
@@ -303,35 +293,7 @@ jobs:
             "cert_sha256=$fp"
             "file=$($chosen.Apk.Name)"
             "ref=$($env:RESOLVED_SHA)"
-            "upload=$($env:STAGING_UPLOAD)"
           ) | Set-Content -LiteralPath $summary -Encoding utf8NoBOM
-          Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'staging-artifact-path.txt') -Value $chosen.Apk.FullName -Encoding utf8NoBOM
-
-      - name: Upload staging object
-        if: needs.guard.outputs.upload == 'true' && contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
-        env:
-          APP_SLUG: ${{ matrix.app }}
-          STAGING_UPLOAD: ${{ needs.guard.outputs.upload }}
-          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
-          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
-          DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
-          DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if ($env:STAGING_UPLOAD -ne 'true') { throw 'refusing upload' }
-          $app = $env:APP_SLUG
-          if ($app -notin @('daymica', 'password-vault')) { throw 'app failed allowlist' }
-          $path = (Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'staging-artifact-path.txt') -Raw).Trim()
-          if (-not (Test-Path -LiteralPath $path)) { throw 'artifact missing' }
-          $leaf = Split-Path -Leaf $path
-          $key = "public/releases-staging/$app/$leaf"
-          if ($key -notmatch '^public/releases-staging/(daymica|password-vault)/[A-Za-z0-9._+-]+$') {
-            throw 'upload key failed allowlist'
-          }
-          . ./scripts/lib/lib-rustfs-upload.ps1
-          $null = Get-RustFsConfig
-          Write-Host "STAGING upload key=$key"
-          Publish-RustFsObject -Key $key -FilePath $path -Required | Out-Null
 
       - name: Delete staging keystore
         if: always() && contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
@@ -363,9 +325,6 @@ jobs:
     needs: guard
     runs-on: windows-latest
     timeout-minutes: 90
-    permissions:
-      contents: read
-      actions: write
     strategy:
       fail-fast: false
       matrix:
@@ -432,7 +391,6 @@ jobs:
         env:
           APP_SLUG: ${{ matrix.app }}
           RESOLVED_SHA: ${{ needs.guard.outputs.sha }}
-          STAGING_UPLOAD: ${{ needs.guard.outputs.upload }}
         run: |
           $ErrorActionPreference = 'Stop'
           $app = $env:APP_SLUG
@@ -470,35 +428,7 @@ jobs:
             'cert_sha256='
             "file=$($pick.Name)"
             "ref=$($env:RESOLVED_SHA)"
-            "upload=$($env:STAGING_UPLOAD)"
           ) | Set-Content -LiteralPath $summary -Encoding utf8NoBOM
-          Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'staging-artifact-path.txt') -Value $pick.FullName -Encoding utf8NoBOM
-
-      - name: Upload staging object
-        if: needs.guard.outputs.upload == 'true' && contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
-        env:
-          APP_SLUG: ${{ matrix.app }}
-          STAGING_UPLOAD: ${{ needs.guard.outputs.upload }}
-          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
-          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
-          DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
-          DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if ($env:STAGING_UPLOAD -ne 'true') { throw 'refusing upload' }
-          $app = $env:APP_SLUG
-          if ($app -notin @('daymica', 'password-vault')) { throw 'app failed allowlist' }
-          $path = (Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'staging-artifact-path.txt') -Raw).Trim()
-          if (-not (Test-Path -LiteralPath $path)) { throw 'artifact missing' }
-          $leaf = Split-Path -Leaf $path
-          $key = "public/releases-staging/$app/$leaf"
-          if ($key -notmatch '^public/releases-staging/(daymica|password-vault)/[A-Za-z0-9._+-]+$') {
-            throw 'upload key failed allowlist'
-          }
-          . ./scripts/lib/lib-rustfs-upload.ps1
-          $null = Get-RustFsConfig
-          Write-Host "STAGING upload key=$key"
-          Publish-RustFsObject -Key $key -FilePath $path -Required | Out-Null
 
       - name: Upload summary
         if: success() && contains(needs.guard.outputs.apps, format(',{0},', matrix.app))

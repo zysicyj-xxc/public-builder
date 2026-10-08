@@ -20,6 +20,11 @@ name: Flutter Test
 on:
   repository_dispatch:
     types: [visual-lint]
+  # ponytail: proof-only. Push on this branch runs shared_package against
+  # f232ec1 because this token cannot workflow_dispatch (actions: write).
+  # Removed before the PR is ready. Do not merge this trigger.
+  push:
+    branches: [feat/ci-shared-package-tests]
   workflow_dispatch:
     inputs:
       ref:
@@ -67,8 +72,8 @@ jobs:
         id: resolve
         uses: ./.github/actions/resolve-private-ref
         with:
-          ref: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
-          sha: ${{ github.event.client_payload.sha || github.event.inputs.sha }}
+          ref: ${{ github.event_name == 'push' && 'f232ec1b5e25f9a7cc497899ee73341f00755f33' || github.event.client_payload.ref || github.event.inputs.ref }}
+          sha: ${{ github.event_name == 'push' && 'f232ec1b5e25f9a7cc497899ee73341f00755f33' || github.event.client_payload.sha || github.event.inputs.sha }}
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
 
       - name: Decide from private diff
@@ -127,7 +132,7 @@ jobs:
           fi
 
       - name: Set pending status
-        if: steps.paths.outputs.run == 'true' && github.event.inputs.only != 'shared_package'
+        if: steps.paths.outputs.run == 'true' && github.event.inputs.only != 'shared_package' && github.event_name != 'push'
         env:
           SHA: ${{ steps.resolve.outputs.sha }}
           GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
@@ -145,7 +150,7 @@ jobs:
             -f context="flutter-test (mail-box)" >/dev/null
 
       - name: Set shared_package pending status
-        if: steps.paths.outputs.shared_package == '1' || github.event.inputs.only == 'shared_package'
+        if: steps.paths.outputs.shared_package == '1' || github.event.inputs.only == 'shared_package' || github.event_name == 'push'
         env:
           SHA: ${{ steps.resolve.outputs.sha }}
           GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
@@ -165,7 +170,7 @@ jobs:
   test:
     name: flutter-test (mail-box)
     needs: meta
-    if: needs.meta.outputs.run == 'true' && github.event.inputs.only != 'shared_package'
+    if: needs.meta.outputs.run == 'true' && github.event.inputs.only != 'shared_package' && github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -213,7 +218,7 @@ jobs:
   report:
     name: post-status
     needs: [meta, test]
-    if: always() && needs.meta.result == 'success' && needs.meta.outputs.run == 'true' && github.event.inputs.only != 'shared_package'
+    if: always() && needs.meta.result == 'success' && needs.meta.outputs.run == 'true' && github.event.inputs.only != 'shared_package' && github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -244,7 +249,7 @@ jobs:
   test_shared:
     name: flutter-test (shared_package)
     needs: meta
-    if: needs.meta.outputs.shared_package == '1' || github.event.inputs.only == 'shared_package'
+    if: needs.meta.outputs.shared_package == '1' || github.event.inputs.only == 'shared_package' || github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -322,7 +327,7 @@ jobs:
   report_shared:
     name: post-status (shared_package)
     needs: [meta, test_shared]
-    if: always() && needs.meta.result == 'success' && (needs.meta.outputs.shared_package == '1' || github.event.inputs.only == 'shared_package')
+    if: always() && needs.meta.result == 'success' && (needs.meta.outputs.shared_package == '1' || github.event.inputs.only == 'shared_package' || github.event_name == 'push')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

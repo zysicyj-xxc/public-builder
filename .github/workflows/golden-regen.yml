@@ -143,6 +143,13 @@ jobs:
           else
             echo "(none)"
           fi
+          # Temporary: counts only. Removed with the pull_request trigger.
+          echo "pub_rc=${pub_rc} test_rc=${test_rc}"
+          if [ -f "$test_log" ]; then
+            grep -E '^[0-9]+:[0-9]+ \+[0-9]+( -[0-9]+)?: (All tests passed!|Some tests failed\.)$' "$test_log" | tail -n 1 || true
+            marks=$(grep -c '\[E\]' "$test_log" || true)
+            echo "error_marks=${marks:-0}"
+          fi
           {
             echo "pub_rc=${pub_rc}"
             echo "test_rc=${test_rc}"

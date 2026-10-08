@@ -366,10 +366,8 @@ jobs:
             apps/yaoxiaobai/yaoxiaobai_app
             apps/footprint
             apps/password-vault
-            apps/issue-board
             apps/mail-box
             apps/eye-care
-            apps/token-board
             apps/admin-app
           )
           for d in "${APPS[@]}"; do

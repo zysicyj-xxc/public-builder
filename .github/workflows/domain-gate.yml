@@ -1,0 +1,153 @@
+# Domain registry gate for zysicyj-xxc/zysicyj.
+# Trust boundary: repository_dispatch client_payload and workflow_dispatch inputs are untrusted.
+# Allowlist ref/sha before any API call. Status posts run in a separate job so
+# PRIVATE_REPO_ACCESS_TOKEN is not on the runner that executes private-repo code.
+#
+# The private check is one process: scripts/lib/assert-domain-registry.ps1
+# (CORS / OAuth host / Flutter esaApiHosts / website INFRA_SUBDOMAINS).
+# Commit-status context matches the old self-hosted job name: assert domain registry.
+
+name: Domain Gate
+
+on:
+  pull_request:
+  repository_dispatch:
+    types: [domain-gate]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref or SHA of zysicyj-xxc/zysicyj'
+        required: true
+        type: string
+      sha:
+        description: 'Commit SHA for checkout and status (default: resolve ref)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: domain-gate-${{ github.event.client_payload.sha || github.event.inputs.sha || github.event.client_payload.ref || github.event.inputs.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  meta:
+    name: resolve-payload
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      ref: ${{ steps.resolve.outputs.ref }}
+    steps:
+      - name: Checkout public-builder
+        uses: actions/checkout@v4
+
+      - name: Allowlist ref/sha
+        id: resolve
+        uses: ./.github/actions/resolve-private-ref
+        with:
+          ref: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
+          sha: ${{ github.event.client_payload.sha || github.event.inputs.sha }}
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+
+      - name: Set pending status
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "ERROR: sha failed allowlist" >&2
+            exit 1
+          fi
+          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
+            -f state="pending" \
+            -f target_url="${RUN_URL}" \
+            -f description="running on public-builder" \
+            -f context="assert domain registry" >/dev/null
+
+      - name: Post failure when resolve fails
+        if: failure()
+        env:
+          RESOLVED_SHA: ${{ steps.resolve.outputs.sha }}
+          RAW_SHA: ${{ github.event.client_payload.sha || github.event.inputs.sha }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          sha=$(printf '%s' "${RESOLVED_SHA:-}" | tr 'A-F' 'a-f' | tr -d '[:space:]')
+          if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
+            sha=$(printf '%s' "${RAW_SHA:-}" | tr 'A-F' 'a-f' | tr -d '[:space:]')
+          fi
+          if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "no allowlisted sha; dispatcher pending left in place"
+            exit 0
+          fi
+          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${sha}" \
+            -f state="failure" \
+            -f target_url="${RUN_URL}" \
+            -f description="payload rejected" \
+            -f context="assert domain registry" >/dev/null
+
+  verify:
+    name: assert domain registry
+    needs: meta
+    if: always() && (needs.meta.result == 'success' || github.event_name == 'pull_request')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          # ponytail: pull_request ref fallback is only for the verification run; drop it with the pull_request trigger.
+          ref: ${{ needs.meta.outputs.sha || 'main' }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: assert domain registry
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Test-Path -LiteralPath './scripts/lib/assert-domain-registry.ps1')) {
+            throw 'missing scripts/lib/assert-domain-registry.ps1'
+          }
+          & ./scripts/lib/assert-domain-registry.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  report:
+    name: post-statuses
+    needs: [meta, verify]
+    if: always() && needs.meta.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Post conclusion
+        env:
+          SHA: ${{ needs.meta.outputs.sha }}
+          RESULT: ${{ needs.verify.result }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "ERROR: sha failed allowlist" >&2
+            exit 1
+          fi
+          case "$RESULT" in
+            success) state=success; desc=success ;;
+            cancelled) state=failure; desc=cancelled ;;
+            *) state=failure; desc=failure ;;
+          esac
+          echo "status assert domain registry ${state}"
+          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
+            -f state="$state" \
+            -f target_url="${RUN_URL}" \
+            -f description="$desc" \
+            -f context="assert domain registry" >/dev/null

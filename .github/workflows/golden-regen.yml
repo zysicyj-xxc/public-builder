@@ -149,18 +149,28 @@ jobs:
                   continue
               message = ""
               frame = ""
-              for nxt in lines[i + 1 : i + 16]:
+              test_frame = ""
+              for nxt in lines[i + 1 : i + 40]:
                   text = nxt.strip()
                   if not text or text.startswith("##[") or text.startswith("══"):
                       continue
-                  if text.startswith("#") or text.startswith("package:") or " (" in text and ".dart" in text:
+                  if "/test/" in text and "_test.dart" in text and not test_frame:
+                      test_frame = text
+                  is_frame = text.startswith("#") or text.startswith("package:")
+                  if is_frame:
                       if not frame:
                           frame = text
-                      break
+                      if test_frame:
+                          break
+                      continue
                   if text.startswith("When the exception was thrown"):
+                      continue
+                  if text.startswith(("└", "│", "├", "[")):
                       continue
                   if not message:
                       message = text
+              if test_frame:
+                  frame = test_frame
               key = (kind, message, frame)
               if key not in seen_exc:
                   seen_exc.add(key)

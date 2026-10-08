@@ -6,7 +6,11 @@
 # Commands (private repo was not readable from this environment; these match the
 # former CI behavior recorded for tools/visual_lint):
 #   app pubspec depends on visual_lint -> dart run custom_lint
-#   otherwise the historical shadcn_ui grep on lib/ (daymica's custom_lint is riverpod_lint only)
+#   otherwise (daymica's custom_lint is riverpod_lint only) scan code and pubspec
+#   only, not markdown or other docs:
+#     grep package:shadcn_ui in lib/*.dart (--include='*.dart')
+#     and shadcn_ui: keys under pubspec.yaml dependencies / dev_dependencies
+#     (a comment line that mentions shadcn_ui does not count)
 #   golden-tests: flutter test files under apps/shared_package that call matchesGoldenFile
 # Flutter 3.44.8 matches build-private / quality-analyze.
 
@@ -172,13 +176,29 @@ jobs:
           if grep -q 'visual_lint' pubspec.yaml; then
             dart run custom_lint
           else
-            echo "no visual_lint dependency; shadcn_ui grep on lib/"
+            echo "no visual_lint dependency; checking lib/*.dart and pubspec.yaml"
             if [ ! -d lib ]; then
               echo "ERROR: missing ${dir}/lib" >&2
               exit 1
             fi
-            if grep -R -n 'package:shadcn_ui' lib; then
-              echo "ERROR: package:shadcn_ui import in lib/" >&2
+            hit=0
+            if grep -R -n --include='*.dart' 'package:shadcn_ui' lib; then
+              echo "ERROR: code hit: package:shadcn_ui import in lib/*.dart" >&2
+              hit=1
+            fi
+            pubspec_hits=$(awk '
+              /^[^[:space:]#]/ { sec=$1; sub(/:.*/, "", sec); next }
+              /^[[:space:]]*#/ { next }
+              (sec=="dependencies" || sec=="dev_dependencies") && /^[[:space:]]*shadcn_ui:/ {
+                printf "pubspec.yaml:%d:%s\n", NR, $0
+              }
+            ' pubspec.yaml)
+            if [ -n "$pubspec_hits" ]; then
+              printf '%s\n' "$pubspec_hits"
+              echo "ERROR: pubspec hit: shadcn_ui: key in dependencies or dev_dependencies" >&2
+              hit=1
+            fi
+            if [ "$hit" -ne 0 ]; then
               exit 1
             fi
           fi

@@ -4,8 +4,8 @@
 # PRIVATE_REPO_ACCESS_TOKEN and persist-credentials: false.
 # Signing secrets are STAGING_ANDROID_* only. Missing staging keystore falls
 # back to the Android debug certificate inside the private staging script.
-# 这个工作流不上传。以后真要上传测试包，存在哪、用什么凭据另外出方案，
-# 先和 .1 系统盘专家对好，再报用户。
+# 测试包只作为 GitHub Actions artifact 上传，保留 1 天。公开仓库里这些 artifact 公开 1 天。
+# 不上传对象存储，不读生产签名凭据。上传前先数 APK 里生产 API 主机名，出现过就不上传。
 # This workflow does not create tags, GitHub Releases, or CNB builds.
 # repository_dispatch type is staging-build (not the production trigger-build).
 
@@ -214,6 +214,7 @@ jobs:
           if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Check package name and certificate
+        id: record
         if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
         env:
           APP_SLUG: ${{ matrix.app }}
@@ -269,6 +270,17 @@ jobs:
           $fp = $Matches[1]
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $chosen.Apk.FullName).Hash.ToLowerInvariant()
 
+          if ($env:RESOLVED_SHA -notmatch '^[0-9a-f]{40}$') { throw 'sha failed allowlist' }
+          $short = $env:RESOLVED_SHA.Substring(0, 7)
+          $safeVer = ([string]$chosen.Version -replace '[^A-Za-z0-9._-]', '-').Trim('-')
+          if (-not $safeVer) { $safeVer = 'unknown' }
+          $artifact = "staging-$app-android-$safeVer-$short"
+          if ($artifact -notmatch '^staging-(daymica|password-vault)-android-[A-Za-z0-9._-]+-[0-9a-f]{7}$') {
+            throw 'artifact name failed allowlist'
+          }
+          $pkgPath = $chosen.Apk.FullName
+          if ($pkgPath -match '[\r\n]|\$\{\{') { throw 'apk path rejected' }
+
           Write-Host "package=$($chosen.Package)"
           Write-Host "version=$($chosen.Version)"
           Write-Host "version_code=$($chosen.Code)"
@@ -276,6 +288,7 @@ jobs:
           Write-Host "cert_sha256=$fp"
           Write-Host "sha256=$hash"
           Write-Host "file=$($chosen.Apk.Name)"
+          Write-Host "artifact=$artifact"
 
           $summary = Join-Path $env:RUNNER_TEMP 'staging-build-summary.txt'
           @(
@@ -288,8 +301,54 @@ jobs:
             "cert_dn=$subject"
             "cert_sha256=$fp"
             "file=$($chosen.Apk.Name)"
+            "artifact=$artifact"
             "ref=$($env:RESOLVED_SHA)"
           ) | Set-Content -LiteralPath $summary -Encoding utf8NoBOM
+          Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'staging-package-path.txt') -Value $pkgPath -Encoding utf8NoBOM
+          @(
+            "artifact_name=$artifact"
+            "package_path=$pkgPath"
+          ) | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8NoBOM
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "app=$app platform=android version=$($chosen.Version) artifact=$artifact" -Encoding utf8NoBOM
+
+      - name: Reject production API hosts
+        if: success() && contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
+        shell: bash
+        run: |
+          set -euo pipefail
+          path="$(tr -d '\r' < "$RUNNER_TEMP/staging-package-path.txt")"
+          if [ ! -f "$path" ]; then
+            echo "apk missing" >&2
+            exit 1
+          fi
+          python3 - "$path" <<'PY'
+          import sys, zipfile
+          import re
+          path = sys.argv[1]
+          pat = re.compile(rb"(?<!test-)api-[a-z0-9-]+\.zysicyj\.top")
+          counts = {}
+          def tally(blob):
+              folded = bytes(b | 0x20 if 65 <= b <= 90 else b for b in blob)
+              for match in pat.finditer(folded):
+                  host = match.group(0).decode("ascii")
+                  counts[host] = counts.get(host, 0) + 1
+          try:
+              zf = zipfile.ZipFile(path)
+          except zipfile.BadZipFile:
+              print("apk is not a zip", file=sys.stderr)
+              sys.exit(1)
+          with zf:
+              for info in zf.infolist():
+                  tally(info.filename.encode("utf-8", "surrogateescape"))
+                  if info.is_dir():
+                      continue
+                  tally(zf.read(info))
+          counts.setdefault("api-daymica.zysicyj.top", 0)
+          for host in sorted(counts):
+              print(f"{host} {counts[host]}")
+          if any(counts.values()):
+              sys.exit(1)
+          PY
 
       - name: Delete staging keystore
         if: always() && contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
@@ -306,6 +365,15 @@ jobs:
             }
           }
           if ($removed) { Write-Host 'removed staging keystore' } else { Write-Host 'no staging keystore file' }
+
+      - name: Upload APK
+        if: success() && contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.record.outputs.artifact_name }}
+          path: ${{ steps.record.outputs.package_path }}
+          retention-days: 1
+          if-no-files-found: error
 
       - name: Upload summary
         if: success() && contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
@@ -383,6 +451,7 @@ jobs:
           if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Record Windows summary
+        id: record
         if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
         env:
           APP_SLUG: ${{ matrix.app }}
@@ -406,11 +475,22 @@ jobs:
           $pool = if ($installer.Count -gt 0) { $installer } else { $all }
           $pick = $pool | Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if (-not $pick) { throw 'no windows artifact' }
-          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $pick.FullName).Hash.ToLowerInvariant()
+          if ($env:RESOLVED_SHA -notmatch '^[0-9a-f]{40}$') { throw 'sha failed allowlist' }
+          $short = $env:RESOLVED_SHA.Substring(0, 7)
+          $safeVer = ([string]$version -replace '[^A-Za-z0-9._-]', '-').Trim('-')
+          if (-not $safeVer) { $safeVer = 'unknown' }
+          $artifact = "staging-$app-windows-$safeVer-$short"
+          if ($artifact -notmatch '^staging-(daymica|password-vault)-windows-[A-Za-z0-9._-]+-[0-9a-f]{7}$') {
+            throw 'artifact name failed allowlist'
+          }
+          $pkgPath = $pick.FullName
+          if ($pkgPath -match '[\r\n]|\$\{\{') { throw 'package path rejected' }
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $pkgPath).Hash.ToLowerInvariant()
           Write-Host "package="
           Write-Host "version=$version"
           Write-Host "sha256=$hash"
           Write-Host "file=$($pick.Name)"
+          Write-Host "artifact=$artifact"
           Write-Host "cert_dn="
           Write-Host "cert_sha256="
           $summary = Join-Path $env:RUNNER_TEMP 'staging-build-summary.txt'
@@ -423,8 +503,23 @@ jobs:
             'cert_dn='
             'cert_sha256='
             "file=$($pick.Name)"
+            "artifact=$artifact"
             "ref=$($env:RESOLVED_SHA)"
           ) | Set-Content -LiteralPath $summary -Encoding utf8NoBOM
+          @(
+            "artifact_name=$artifact"
+            "package_path=$pkgPath"
+          ) | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8NoBOM
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "app=$app platform=windows version=$version artifact=$artifact" -Encoding utf8NoBOM
+
+      - name: Upload Windows package
+        if: success() && contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.record.outputs.artifact_name }}
+          path: ${{ steps.record.outputs.package_path }}
+          retention-days: 1
+          if-no-files-found: error
 
       - name: Upload summary
         if: success() && contains(needs.guard.outputs.apps, format(',{0},', matrix.app))

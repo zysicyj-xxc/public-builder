@@ -251,11 +251,13 @@ jobs:
       mysql:
         image: mysql:8.0
         env:
-          MYSQL_ROOT_PASSWORD: ci_test_only
+          MYSQL_ROOT_PASSWORD: test
           MYSQL_ROOT_HOST: '%'
           MYSQL_DATABASE: zysicyj_test
         ports:
           - 3306:3306
+        # Same server flags as backend/docker-compose.test.yml. Port here is 3306, not the local 13306.
+        command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci --default-authentication-plugin=mysql_native_password
         options: >-
           --health-cmd="mysqladmin ping -h 127.0.0.1 --silent"
           --health-interval=10s
@@ -273,63 +275,34 @@ jobs:
         with:
           go-version: '1.26.6'
           cache-dependency-path: backend/go.sum
-      - name: Describe test DB setup
+      - name: Show DSN helper and gap SQL
         run: |
           set -euo pipefail
           python3 - << 'PY'
-          import re, pathlib
+          import pathlib, re
           def redact(line: str) -> str:
               line = re.sub(r'([A-Za-z0-9_.-]+):[^@\s\'"]+@', r'\1:***@', line)
-              line = re.sub(r'(?i)(password|passwd|pwd|secret)\s*[:=]\s*\S+', r'\1=***', line)
-              line = re.sub(r'(?i)(ghp_|gho_|github_pat_)[A-Za-z0-9_]+', r'\1***', line)
+              line = re.sub(r'(?i)(password|passwd|pwd)\s*[:=]\s*\S+', r'\1=***', line)
               return line.rstrip()
-          files = [
-              pathlib.Path('scripts/run-backend-test-db.ps1'),
-              pathlib.Path('backend/docker-compose.test.yml'),
+          paths = [
+              'scripts/lib/lib-backend-test-db.ps1',
+              'backend/sql/security_settings.sql',
+              'backend/sql/user_totp_trusted_devices.sql',
+              'backend/sql/user_app_memberships.sql',
           ]
-          for p in files:
-              print(f'===== {p} exists={p.exists()} =====')
+          for rel in paths:
+              p = pathlib.Path(rel)
+              print(f'===== {rel} exists={p.exists()} =====')
               if not p.exists():
                   continue
               for i, line in enumerate(p.read_text(encoding='utf-8', errors='replace').splitlines(), 1):
                   print(f'{i}:{redact(line)}')
-          db = pathlib.Path('backend/internal/testutil/db.go')
-          print(f'===== {db} autoMigrateAll =====')
-          if db.exists():
-              lines = db.read_text(encoding='utf-8', errors='replace').splitlines()
-              capturing = False
-              for i, line in enumerate(lines, 1):
-                  if line.startswith('func autoMigrateAll') or line.startswith('func clean') or '清空' in line or '重建' in line:
-                      capturing = True
-                  if capturing:
-                      print(f'{i}:{redact(line)}')
-                      if line.startswith('func ') and not (line.startswith('func autoMigrateAll') or line.startswith('func clean')):
-                          break
-                      if i > 0 and capturing and line == '}' and lines[i-1:i] and sum(1 for x in lines[max(0,i-40):i] if x.startswith('func autoMigrateAll') or x.startswith('func clean')):
-                          # stop at the closing brace of the captured func if the next non-empty is another func; handled below
-                          pass
-              # print the captured function only, ended by a column-0 closing brace
-              print('----- slice -----')
-              start = next((i for i,l in enumerate(lines) if l.startswith('func autoMigrateAll')), None)
-              if start is not None:
-                  for i in range(start, len(lines)):
-                      print(f'{i+1}:{redact(lines[i])}')
-                      if i > start and lines[i] == '}':
-                          break
-          print('===== CREATE TABLE names =====')
-          for p in sorted(pathlib.Path('backend').rglob('*.sql')):
-              rel = p.as_posix()
-              if '/vendor/' in rel:
-                  continue
-              for i, line in enumerate(p.read_text(encoding='utf-8', errors='replace').splitlines(), 1):
-                  if re.search(r'CREATE TABLE', line, re.I):
-                      print(f'{rel}:{i}:{redact(line)[:180]}')
           PY
       - name: go build + test
         working-directory: backend
         env:
           # go-sql-driver DSN. Image creates zysicyj_test; tests migrate on connect.
-          TEST_DATABASE_DSN: "root:ci_test_only@tcp(127.0.0.1:3306)/zysicyj_test?parseTime=true&charset=utf8mb4&loc=Local&multiStatements=true"
+          TEST_DATABASE_DSN: "root:test@tcp(127.0.0.1:3306)/zysicyj_test?charset=utf8mb4&parseTime=True&loc=Local"
           CLEAN_TEST_DB: "true"
         run: |
           set -euo pipefail

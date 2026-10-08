@@ -1,0 +1,75 @@
+# Temporary inspect of private staging scripts. Replaced before review.
+# Trust boundary: pull_request is same-repo only and is removed after verification.
+
+name: Staging Builds
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    name: inspect-staging-scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout public-builder
+        uses: actions/checkout@v4
+
+      - name: Allowlist ref
+        id: resolve
+        uses: ./.github/actions/resolve-private-ref
+        with:
+          ref: main
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+
+      - name: Issue and script paths
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          SHA: ${{ steps.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          echo "resolved_sha=$SHA"
+          gh issue view 107 --repo zysicyj-xxc/zysicyj
+          echo "===== TREE ====="
+          gh api "repos/zysicyj-xxc/zysicyj/git/trees/${SHA}?recursive=1" --jq '.tree[].path' \
+            | grep -E '^(scripts/|apps/(daymica|password-vault)/)' \
+            | grep -Ei 'staging|channel|android|windows|keystore|gradle' \
+            || true
+
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ steps.resolve.outputs.sha }}
+          path: private
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Print staging interfaces
+        working-directory: private
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib, re
+          root = pathlib.Path('.')
+          files = sorted(root.glob('scripts/**/*.ps1'))
+          interesting = []
+          secret_line = re.compile(r'(password|secret|token|keystore)\s*=\s*\S+', re.I)
+          for p in files:
+              text = p.read_text(encoding='utf-8', errors='replace')
+              if re.search(r'staging|Channel|app_name_staging', text, re.I):
+                  interesting.append(p)
+          print('INTERESTING', len(interesting))
+          for p in interesting:
+              text = p.read_text(encoding='utf-8', errors='replace')
+              print('\n===== FILE', p, 'lines', text.count('\n') + 1, '=====')
+              for i, line in enumerate(text.splitlines(), 1):
+                  if secret_line.search(line) and 'env:' not in line and '$' not in line:
+                      print(f'{i}: <redacted assignment>')
+                      continue
+                  print(f'{i}: {line}')
+          PY

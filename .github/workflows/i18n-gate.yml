@@ -5,6 +5,9 @@
 #
 # The private script is one process (scripts/ci-verify-l10n-gates.ps1). Each
 # i18n-gate (<app>) context mirrors that single exit code.
+# It Push-Locations into each app and runs `flutter test --no-pub test/l10n`
+# without pub get. A fresh checkout has no package_config, so flutter test
+# reports a missing flutter_test dependency for every app. pub get first.
 # Flutter 3.44.8 is on PATH in case the script shells out to flutter.
 
 name: i18n Gate
@@ -36,68 +39,6 @@ defaults:
     shell: bash
 
 jobs:
-  probe:
-    name: probe-l10n-layout
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: zysicyj-xxc/zysicyj
-          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          ref: 06a7138d68a3646f65838d8a2b1c1b3d4a36a832
-          persist-credentials: false
-          fetch-depth: 1
-      - name: flags only
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $script = './scripts/ci-verify-l10n-gates.ps1'
-          $text = Get-Content -LiteralPath $script -Raw
-          $flags = @(
-            'no-pub', 'dart test', 'flutter test', 'flutter pub get', 'dart pub get',
-            'Set-Location', 'Push-Location', 'gen-l10n', 'untranslated', 'package:test'
-          )
-          foreach ($f in $flags) {
-            Write-Host ("flag {0}={1}" -f $f, $text.Contains($f))
-          }
-          $n = 0
-          foreach ($line in ($text -split "`n")) {
-            if ($line -notmatch 'flutter|Push-Location|Pop-Location|pub get|no-pub') { continue }
-            $redacted = [regex]::Replace($line.Trim(), "'[^']*'|`"[^`"]*`"", "''")
-            if ($redacted.Length -gt 180) { $redacted = $redacted.Substring(0, 180) }
-            Write-Host ("line {0}" -f $redacted)
-            $n++
-            if ($n -ge 40) { break }
-          }
-          Write-Host ("root_pubspec={0}" -f (Test-Path -LiteralPath './pubspec.yaml'))
-          Write-Host ("root_package_config={0}" -f (Test-Path -LiteralPath './.dart_tool/package_config.json'))
-          if (Test-Path -LiteralPath './pubspec.yaml') {
-            $root = Get-Content -LiteralPath './pubspec.yaml' -Raw
-            Write-Host ("root_workspace={0}" -f $root.Contains('workspace:'))
-            Write-Host ("root_resolution={0}" -f $root.Contains('resolution:'))
-            Write-Host ("root_flutter_test={0}" -f $root.Contains('flutter_test'))
-          }
-          $apps = @(
-            'apps/daymica', 'apps/mail-box', 'apps/password-vault',
-            'apps/yaoxiaobai/yaoxiaobai_app', 'apps/eye-care', 'apps/footprint',
-            'apps/water-tracker', 'apps/admin-app', 'apps/shared_package'
-          )
-          foreach ($d in $apps) {
-            $pub = Join-Path $d 'pubspec.yaml'
-            $pc = Join-Path $d '.dart_tool/package_config.json'
-            $hasPub = Test-Path -LiteralPath $pub
-            $hasFt = $false
-            $res = $false
-            if ($hasPub) {
-              $body = Get-Content -LiteralPath $pub -Raw
-              $hasFt = $body.Contains('flutter_test')
-              $res = $body.Contains('resolution:')
-            }
-            Write-Host ("app {0} pubspec={1} flutter_test={2} resolution={3} package_config={4}" -f $d, $hasPub, $hasFt, $res, (Test-Path -LiteralPath $pc))
-          }
-
   meta:
     name: resolve-payload
     if: github.event_name != 'pull_request'
@@ -186,6 +127,7 @@ jobs:
   verify:
     name: ci-verify-l10n-gates
     needs: meta
+    if: always() && (needs.meta.result == 'success' || github.event_name == 'pull_request')
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -193,7 +135,8 @@ jobs:
         with:
           repository: zysicyj-xxc/zysicyj
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          ref: ${{ needs.meta.outputs.sha }}
+          # ponytail: pull_request fallback sha is only for the verification run; drop it with the pull_request trigger.
+          ref: ${{ needs.meta.outputs.sha || '06a7138d68a3646f65838d8a2b1c1b3d4a36a832' }}
           persist-credentials: false
           fetch-depth: 1
       - uses: subosito/flutter-action@v2
@@ -201,46 +144,22 @@ jobs:
           flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
-      - name: probe l10n runner layout
-        shell: pwsh
+      - name: pub get for l10n packages
         run: |
-          $ErrorActionPreference = 'Stop'
-          $script = './scripts/ci-verify-l10n-gates.ps1'
-          $text = Get-Content -LiteralPath $script -Raw
-          $flags = @(
-            'no-pub', 'dart test', 'flutter test', 'flutter pub get', 'dart pub get',
-            'Set-Location', 'Push-Location', 'gen-l10n', 'untranslated', 'package:test'
-          )
-          foreach ($f in $flags) {
-            $hit = $text.Contains($f)
-            Write-Host ("flag {0}={1}" -f $f, $hit)
-          }
-          Write-Host ("root_pubspec={0}" -f (Test-Path -LiteralPath './pubspec.yaml'))
-          Write-Host ("root_package_config={0}" -f (Test-Path -LiteralPath './.dart_tool/package_config.json'))
-          if (Test-Path -LiteralPath './pubspec.yaml') {
-            $root = Get-Content -LiteralPath './pubspec.yaml' -Raw
-            Write-Host ("root_workspace={0}" -f $root.Contains('workspace:'))
-            Write-Host ("root_resolution={0}" -f $root.Contains('resolution:'))
-            Write-Host ("root_flutter_test={0}" -f $root.Contains('flutter_test'))
-          }
-          $apps = @(
-            'apps/daymica', 'apps/mail-box', 'apps/password-vault',
-            'apps/yaoxiaobai/yaoxiaobai_app', 'apps/eye-care', 'apps/footprint',
-            'apps/water-tracker', 'apps/admin-app', 'apps/shared_package'
-          )
-          foreach ($d in $apps) {
-            $pub = Join-Path $d 'pubspec.yaml'
-            $pc = Join-Path $d '.dart_tool/package_config.json'
-            $hasPub = Test-Path -LiteralPath $pub
-            $hasFt = $false
-            $res = $false
-            if ($hasPub) {
-              $body = Get-Content -LiteralPath $pub -Raw
-              $hasFt = $body.Contains('flutter_test')
-              $res = $body.Contains('resolution:')
-            }
-            Write-Host ("app {0} pubspec={1} flutter_test={2} resolution={3} package_config={4}" -f $d, $hasPub, $hasFt, $res, (Test-Path -LiteralPath $pc))
-          }
+          set -euo pipefail
+          mapfile -t dirs < <(find apps \( -path '*/test/l10n' -o -path '*/test/l10n.dart' \) -printf '%h\n' | sed 's|/test$||' | sort -u)
+          if [ "${#dirs[@]}" -eq 0 ]; then
+            echo "ERROR: no test/l10n entrypoints" >&2
+            exit 1
+          fi
+          for dir in "${dirs[@]}"; do
+            if [ ! -f "${dir}/pubspec.yaml" ]; then
+              echo "ERROR: ${dir} has test/l10n but no pubspec.yaml" >&2
+              exit 1
+            fi
+            echo "== pub get ${dir} =="
+            (cd "${dir}" && flutter pub get)
+          done
       - name: l10n gates
         shell: pwsh
         run: |

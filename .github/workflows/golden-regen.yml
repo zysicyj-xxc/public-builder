@@ -9,8 +9,6 @@
 name: Golden Regen
 
 on:
-  # Temporary: this token cannot call workflow_dispatch (403). Removed after verification.
-  pull_request:
   workflow_dispatch:
     inputs:
       ref:
@@ -142,29 +140,6 @@ jobs:
             cat "$list"
           else
             echo "(none)"
-          fi
-          # Temporary: keyword counts only. Removed with the pull_request trigger.
-          echo "pub_rc=${pub_rc} test_rc=${test_rc}"
-          if [ -f "$test_log" ]; then
-            plain="${RUNNER_TEMP}/flutter-test-plain.log"
-            sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' "$test_log" >"$plain"
-            echo "log_lines=$(grep -cve '^[[:space:]]*$' "$plain" || true)"
-            count_key() {
-              n=$(grep -F -c -e "$2" "$plain" || true)
-              echo "count_${1}=${n}"
-            }
-            count_key some_tests_failed "Some tests failed"
-            count_key all_tests_passed "All tests passed"
-            count_key error_mark "[E]"
-            count_key error "Error"
-            count_key exception "Exception"
-            count_key failed_to "Failed to"
-            count_key no_tests "No tests"
-            count_key compilation "compilation"
-            count_key golden "Golden"
-            count_key unable "Unable"
-            count_key exited "exited"
-            count_key font "font"
           fi
           {
             echo "pub_rc=${pub_rc}"

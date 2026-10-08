@@ -237,6 +237,21 @@ jobs:
     if: ${{ needs.meta.outputs.do_backend == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Throwaway MySQL 8. Password lives only in this container; not a repo secret.
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: ci_test_only
+          MYSQL_ROOT_HOST: '%'
+          MYSQL_DATABASE: zysicyj_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -251,10 +266,28 @@ jobs:
           cache-dependency-path: backend/go.sum
       - name: go build + test
         working-directory: backend
+        env:
+          # go-sql-driver DSN. Image creates zysicyj_test; tests migrate on connect.
+          TEST_DATABASE_DSN: "root:ci_test_only@tcp(127.0.0.1:3306)/zysicyj_test?parseTime=true&charset=utf8mb4&loc=Local&multiStatements=true"
+          CLEAN_TEST_DB: "true"
         run: |
           set -euo pipefail
           go build ./...
-          go test ./... -count=1
+          # -p 1: packages share zysicyj_test; CLEAN_TEST_DB races if they run in parallel.
+          go test ./internal/integration/... -count=1 -p 1 -v | tee /tmp/integration.log
+          pass=$(grep -c -- '--- PASS:' /tmp/integration.log || true)
+          skip=$(grep -c -- '--- SKIP:' /tmp/integration.log || true)
+          echo "integration summary PASS=${pass} SKIP=${skip}"
+          if [ "${skip}" -ne 0 ]; then
+            echo "ERROR: integration tests skipped" >&2
+            exit 1
+          fi
+          if [ "${pass}" -lt 1 ]; then
+            echo "ERROR: no integration test passed" >&2
+            exit 1
+          fi
+          mapfile -t pkgs < <(go list ./... | grep -Ev '/internal/integration($|/)')
+          go test "${pkgs[@]}" -count=1 -p 1
 
   website:
     name: website

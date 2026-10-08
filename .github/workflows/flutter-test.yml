@@ -1,10 +1,13 @@
-# Full flutter test for apps/mail-box on zysicyj-xxc/zysicyj.
+# Full flutter test for apps/mail-box and apps/shared_package on zysicyj-xxc/zysicyj.
 # Reuses the private visual-lint dispatcher (event_type visual-lint). That
 # dispatcher already fires for apps/mail-box and apps/shared_package changes,
 # including tests, arb, and golden files. i18n-gate does not: golden-only
 # shared_package updates do not dispatch it.
-# This workflow does not run the test unless the private diff touches
-# apps/mail-box/** or apps/shared_package/**. Other dispatches write no status.
+# mail-box runs when the private diff touches apps/mail-box/** or
+# apps/shared_package/**. shared_package runs only for apps/shared_package/**.
+# Other dispatches write no status for the job they skip.
+# workflow_dispatch input only=shared_package runs that package on the given
+# SHA, skips path filters, and does not run or status mail-box.
 #
 # Trust boundary: repository_dispatch client_payload and workflow_dispatch
 # inputs are untrusted. Allowlist ref/sha before any API call. Status posts
@@ -27,6 +30,11 @@ on:
         description: 'Commit SHA for checkout and status (default: resolve ref)'
         required: false
         type: string
+      only:
+        description: 'Manual override. shared_package runs only that package on the SHA and skips mail-box. Empty uses path filters.'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -47,6 +55,7 @@ jobs:
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
       run: ${{ steps.paths.outputs.run }}
+      shared_package: ${{ steps.paths.outputs.shared_package }}
     steps:
       - name: Checkout public-builder
         uses: actions/checkout@v4
@@ -95,19 +104,30 @@ jobs:
           result=$(bash .github/scripts/flutter_test_paths.sh < "$tmp")
           printf '%s\n' "$result"
           run=$(printf '%s\n' "$result" | awk -F= '$1=="run"{print $2}')
+          shared=$(printf '%s\n' "$result" | awk -F= '$1=="shared_package"{print $2}')
           if [ "$run" != "true" ] && [ "$run" != "false" ]; then
             echo "ERROR: path matcher returned no decision" >&2
             exit 1
           fi
+          if [ "$shared" != "1" ] && [ "$shared" != "0" ]; then
+            echo "ERROR: path matcher returned no shared_package flag" >&2
+            exit 1
+          fi
           echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "shared_package=$shared" >> "$GITHUB_OUTPUT"
           if [ "$run" = "true" ]; then
-            echo "flutter-test: paths match"
+            echo "flutter-test (mail-box): paths match"
           else
-            echo "flutter-test: skip"
+            echo "flutter-test (mail-box): skip"
+          fi
+          if [ "$shared" = "1" ]; then
+            echo "flutter-test (shared_package): paths match"
+          else
+            echo "flutter-test (shared_package): skip"
           fi
 
       - name: Set pending status
-        if: steps.paths.outputs.run == 'true'
+        if: steps.paths.outputs.run == 'true' && github.event.inputs.only != 'shared_package'
         env:
           SHA: ${{ steps.resolve.outputs.sha }}
           GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
@@ -124,10 +144,28 @@ jobs:
             -f description="running on public-builder" \
             -f context="flutter-test (mail-box)" >/dev/null
 
+      - name: Set shared_package pending status
+        if: steps.paths.outputs.shared_package == '1' || github.event.inputs.only == 'shared_package'
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "ERROR: sha failed allowlist" >&2
+            exit 1
+          fi
+          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
+            -f state="pending" \
+            -f target_url="${RUN_URL}" \
+            -f description="running on public-builder" \
+            -f context="flutter-test (shared_package)" >/dev/null
+
   test:
     name: flutter-test (mail-box)
     needs: meta
-    if: needs.meta.outputs.run == 'true'
+    if: needs.meta.outputs.run == 'true' && github.event.inputs.only != 'shared_package'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -175,7 +213,7 @@ jobs:
   report:
     name: post-status
     needs: [meta, test]
-    if: always() && needs.meta.result == 'success' && needs.meta.outputs.run == 'true'
+    if: always() && needs.meta.result == 'success' && needs.meta.outputs.run == 'true' && github.event.inputs.only != 'shared_package'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -202,3 +240,112 @@ jobs:
             -f target_url="${RUN_URL}" \
             -f description="$desc" \
             -f context="flutter-test (mail-box)" >/dev/null
+
+  test_shared:
+    name: flutter-test (shared_package)
+    needs: meta
+    if: needs.meta.outputs.shared_package == '1' || github.event.inputs.only == 'shared_package'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.meta.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          echo "testing sha=$(git rev-parse HEAD)"
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ steps.flutter.outputs.version }}
+          channel: stable
+          cache: true
+
+      - name: flutter pub get and test
+        working-directory: apps/shared_package
+        run: |
+          set -euo pipefail
+          if [ ! -f pubspec.yaml ]; then
+            echo "ERROR: missing apps/shared_package/pubspec.yaml" >&2
+            exit 1
+          fi
+          flutter pub get
+          out="$RUNNER_TEMP/shared-package-test.txt"
+          set +e
+          set +o pipefail
+          flutter test --reporter expanded | tee "$out"
+          rc=${PIPESTATUS[0]}
+          set -o pipefail
+          set -e
+          line=$(grep -E '(^| )[+][0-9]+' "$out" | tail -n 1 || true)
+          cluster=$(printf '%s\n' "$line" | grep -oE '[+][0-9]+( ~[0-9]+)?( -[0-9]+)?' | head -n 1 || true)
+          passed=$(printf '%s' "$cluster" | sed -nE 's/^[+]([0-9]+).*/\1/p')
+          skipped=$(printf '%s' "$cluster" | sed -nE 's/.*~([0-9]+).*/\1/p')
+          failed=$(printf '%s' "$cluster" | sed -nE 's/.*-([0-9]+).*/\1/p')
+          passed=${passed:-0}
+          skipped=${skipped:-0}
+          failed=${failed:-0}
+          rm -f "$out"
+          if [ -z "$cluster" ]; then
+            echo "ERROR: no flutter test summary line" >&2
+            if [ "$rc" -ne 0 ]; then
+              exit "$rc"
+            fi
+            exit 1
+          fi
+          echo "flutter-test summary passed=${passed} skipped=${skipped} failed=${failed}"
+          printf 'passed=%s skipped=%s failed=%s\n' "$passed" "$skipped" "$failed" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$passed" = 0 ] && [ "$skipped" = 0 ] && [ "$failed" = 0 ]; then
+            echo "ERROR: flutter test reported no tests" >&2
+            exit 1
+          fi
+          exit "$rc"
+
+  report_shared:
+    name: post-status (shared_package)
+    needs: [meta, test_shared]
+    if: always() && needs.meta.result == 'success' && (needs.meta.outputs.shared_package == '1' || github.event.inputs.only == 'shared_package')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Post conclusion
+        env:
+          SHA: ${{ needs.meta.outputs.sha }}
+          RESULT: ${{ needs.test_shared.result }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "ERROR: sha failed allowlist" >&2
+            exit 1
+          fi
+          case "$RESULT" in
+            success) state=success; desc=success ;;
+            cancelled) state=failure; desc=cancelled ;;
+            *) state=failure; desc=failure ;;
+          esac
+          echo "status flutter-test (shared_package) ${state}"
+          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
+            -f state="$state" \
+            -f target_url="${RUN_URL}" \
+            -f description="$desc" \
+            -f context="flutter-test (shared_package)" >/dev/null

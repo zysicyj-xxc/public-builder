@@ -78,8 +78,7 @@ jobs:
           post "i18n-gate (yaoxiaobai)"
           post "i18n-gate (eye-care)"
           post "i18n-gate (footprint)"
-          post "i18n-gate (issue-board)"
-          post "i18n-gate (token-board)"
+          post "i18n-gate (water-tracker)"
           post "i18n-gate (admin-app)"
           post "i18n-gate (shared_package)"
 
@@ -107,8 +106,7 @@ jobs:
             "i18n-gate (yaoxiaobai)" \
             "i18n-gate (eye-care)" \
             "i18n-gate (footprint)" \
-            "i18n-gate (issue-board)" \
-            "i18n-gate (token-board)" \
+            "i18n-gate (water-tracker)" \
             "i18n-gate (admin-app)" \
             "i18n-gate (shared_package)"
           do
@@ -178,8 +176,7 @@ jobs:
             "i18n-gate (yaoxiaobai)" \
             "i18n-gate (eye-care)" \
             "i18n-gate (footprint)" \
-            "i18n-gate (issue-board)" \
-            "i18n-gate (token-board)" \
+            "i18n-gate (water-tracker)" \
             "i18n-gate (admin-app)" \
             "i18n-gate (shared_package)"
           do

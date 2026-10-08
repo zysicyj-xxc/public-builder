@@ -9,8 +9,6 @@
 name: Golden Regen
 
 on:
-  # Temporary diagnosis trigger. Removed after the failure list is known.
-  pull_request:
   workflow_dispatch:
     inputs:
       ref:
@@ -86,113 +84,6 @@ jobs:
           else
             test_rc=1
           fi
-          echo "pub_rc=${pub_rc} test_rc=${test_rc}"
-          # Temporary: failed-test names and the first lines of each exception.
-          python3 - "$test_log" <<'PY'
-          import re
-          import sys
-
-          def redact(line):
-              if re.search(
-                  r"(?i)(\btoken\b|\bpassword\b|\bsecret\b|authorization|"
-                  r"(?:postgres|postgresql|mysql|mongodb|redis|amqp)://|"
-                  r"\b(?:server|data source|user id)\s*=)",
-                  line,
-              ):
-                  return "[REDACTED]"
-              return line
-
-          path = sys.argv[1]
-          try:
-              raw = open(path, errors="replace").read()
-          except OSError:
-              print("no flutter log")
-              raise SystemExit(0)
-          raw = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", raw)
-          lines = [ln.rstrip() for ln in raw.splitlines()]
-
-          def emit(kind, text):
-              text = redact(text.strip())
-              if len(text) > 220:
-                  text = text[:220]
-              print(f"{kind} {text}")
-
-          seen_fail = set()
-          for i, line in enumerate(lines):
-              name = ""
-              if line.strip().startswith("The test description was:"):
-                  name = line.split(":", 1)[1].strip()
-                  if not name:
-                      for nxt in lines[i + 1 : i + 4]:
-                          nxt = nxt.strip()
-                          if nxt and not nxt.startswith("##[") and not nxt.startswith("✅"):
-                              name = nxt
-                              break
-              elif re.search(r"\[E\]\s*$", line):
-                  name = re.sub(r"^\d+:\d+\s+\+\d+\s+-\d+:\s*", "", line.strip())
-                  name = re.sub(r"\s+\[E\]\s*$", "", name)
-              if name and name not in seen_fail:
-                  seen_fail.add(name)
-                  emit("FAIL", name)
-
-          seen_exc = set()
-          i = 0
-          while i < len(lines):
-              line = lines[i].strip()
-              kind = ""
-              if line.startswith("The following ") and " was thrown" in line:
-                  kind = line
-              elif line.startswith("The following message was thrown"):
-                  kind = line
-              if not kind:
-                  i += 1
-                  continue
-              message = ""
-              frame = ""
-              test_frame = ""
-              for nxt in lines[i + 1 : i + 120]:
-                  text = nxt.strip()
-                  if not text or text.startswith("##[") or text.startswith("══"):
-                      continue
-                  if "_test.dart" in text and not test_frame:
-                      test_frame = text
-                  if text.startswith("#") or text.startswith("package:"):
-                      if not frame:
-                          frame = text
-                      if test_frame:
-                          break
-                      continue
-                  if text.startswith("When the exception was thrown"):
-                      continue
-                  if text.startswith(("└", "│", "├", "[")):
-                      continue
-                  if not message and (
-                      text.startswith(("Bad state:", "Expected:", "Actual:", "No ", "Failed"))
-                      or "Exception" in text
-                      or "Error" in text
-                  ):
-                      message = text
-                      continue
-                  if message.startswith("Expected:") and text.startswith("Actual:"):
-                      message = message + " " + text
-                      break
-              if test_frame:
-                  frame = test_frame
-              key = (kind, message, frame)
-              if key not in seen_exc:
-                  seen_exc.add(key)
-                  emit("EXC", kind)
-                  emit("MSG", message or "(no message)")
-                  emit("FRAME", frame or "(no frame)")
-              i += 1
-          seen_tf = set()
-          for line in lines:
-              text = line.strip()
-              if text.startswith("#") and "_test.dart" in text and text not in seen_tf:
-                  seen_tf.add(text)
-                  emit("TESTFRAME", text)
-          print(f"fail_count={len(seen_fail)} exc_count={len(seen_exc)} testframe_count={len(seen_tf)}")
-          PY
 
           pack="${RUNNER_TEMP}/golden-pack"
           rm -rf "$pack"

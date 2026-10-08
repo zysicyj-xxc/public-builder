@@ -11,8 +11,6 @@
 name: Golden Regen
 
 on:
-  # Temporary: this token cannot call workflow_dispatch (403). Removed after verification.
-  pull_request:
   workflow_dispatch:
     inputs:
       ref:

@@ -237,6 +237,21 @@ jobs:
     if: ${{ needs.meta.outputs.do_backend == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Throwaway MySQL 8. Password lives only in this container; not a repo secret.
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: test
+          MYSQL_ROOT_HOST: '%'
+          MYSQL_DATABASE: zysicyj_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -249,12 +264,51 @@ jobs:
         with:
           go-version: '1.26.6'
           cache-dependency-path: backend/go.sum
+      - name: Create tables AutoMigrate skips
+        env:
+          MYSQL_PWD: test
+        run: |
+          set -euo pipefail
+          # testutil AutoMigrate omits these. The ps1 only starts MySQL; a fresh
+          # database needs the CREATE TABLE IF NOT EXISTS scripts.
+          cid=$(docker ps -q --filter ancestor=mysql:8.0 | head -n 1)
+          if [ -z "$cid" ]; then
+            echo "ERROR: mysql service container not found" >&2
+            docker ps --format '{{.Image}}' >&2
+            exit 1
+          fi
+          for f in \
+            backend/sql/security_settings.sql \
+            backend/sql/user_totp_trusted_devices.sql \
+            backend/sql/user_app_memberships.sql
+          do
+            echo "apply ${f}"
+            docker exec -i -e MYSQL_PWD "$cid" mysql --protocol=TCP -uroot zysicyj_test < "$f"
+          done
       - name: go build + test
         working-directory: backend
+        env:
+          # Same query string as scripts/lib/lib-backend-test-db.ps1 local DSN. Port is the mapped 3306.
+          TEST_DATABASE_DSN: "root:test@tcp(127.0.0.1:3306)/zysicyj_test?charset=utf8mb4&parseTime=True&loc=Local"
+          CLEAN_TEST_DB: "true"
         run: |
           set -euo pipefail
           go build ./...
-          go test ./... -count=1
+          # -p 1: packages share zysicyj_test; CLEAN_TEST_DB races if they run in parallel.
+          go test ./internal/integration/... -count=1 -p 1 -v | tee /tmp/integration.log
+          pass=$(grep -c -- '--- PASS:' /tmp/integration.log || true)
+          skip=$(grep -c -- '--- SKIP:' /tmp/integration.log || true)
+          echo "integration summary PASS=${pass} SKIP=${skip}"
+          if [ "${skip}" -ne 0 ]; then
+            echo "ERROR: integration tests skipped" >&2
+            exit 1
+          fi
+          if [ "${pass}" -lt 1 ]; then
+            echo "ERROR: no integration test passed" >&2
+            exit 1
+          fi
+          mapfile -t pkgs < <(go list ./... | grep -Ev '/internal/integration($|/)')
+          go test "${pkgs[@]}" -count=1 -p 1
 
   website:
     name: website

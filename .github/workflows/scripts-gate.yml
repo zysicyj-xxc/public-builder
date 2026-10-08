@@ -29,13 +29,12 @@ on:
         description: 'Commit SHA for checkout and status (default: resolve ref)'
         required: false
         type: string
-  pull_request:
 
 permissions:
   contents: read
 
 concurrency:
-  group: scripts-gate-${{ github.event.client_payload.sha || github.event.inputs.sha || github.event.client_payload.ref || github.event.inputs.ref || github.event.pull_request.head.sha || github.run_id }}
+  group: scripts-gate-${{ github.event.client_payload.sha || github.event.inputs.sha || github.event.client_payload.ref || github.event.inputs.ref }}
   cancel-in-progress: true
 
 defaults:
@@ -62,7 +61,7 @@ jobs:
         id: resolve
         uses: ./.github/actions/resolve-private-ref
         with:
-          ref: ${{ github.event.client_payload.ref || github.event.inputs.ref || (github.event_name == 'pull_request' && 'main' || '') }}
+          ref: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
           sha: ${{ github.event.client_payload.sha || github.event.inputs.sha }}
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
 

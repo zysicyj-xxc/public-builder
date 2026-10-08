@@ -256,8 +256,6 @@ jobs:
           MYSQL_DATABASE: zysicyj_test
         ports:
           - 3306:3306
-        # Same server flags as backend/docker-compose.test.yml. Port here is 3306, not the local 13306.
-        command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci --default-authentication-plugin=mysql_native_password
         options: >-
           --health-cmd="mysqladmin ping -h 127.0.0.1 --silent"
           --health-interval=10s

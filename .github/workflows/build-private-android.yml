@@ -281,7 +281,7 @@ jobs:
           name: daymica-play-aab-${{ needs.validate.outputs.daymica_version }}-${{ needs.validate.outputs.daymica_build }}
           path: apps/daymica/build/app/outputs/bundle/playRelease/app-play-release.aab
           if-no-files-found: ignore
-          retention-days: 30
+          retention-days: 1
 
   yaoxiaobai-android:
     name: yaoxiaobai-android-arm64
@@ -585,7 +585,7 @@ jobs:
           name: passwordvault-play-aab-${{ needs.validate.outputs.newapp_version }}-${{ needs.validate.outputs.newapp_build }}
           path: apps/password-vault/build/app/outputs/bundle/release/app-release.aab
           if-no-files-found: ignore
-          retention-days: 30
+          retention-days: 1
 
   mailbox-android:
     name: mailbox-android-arm64
@@ -783,7 +783,7 @@ jobs:
           name: yaoxiaobai-play-aab-${{ needs.validate.outputs.yaoxiaobai_version }}-${{ needs.validate.outputs.yaoxiaobai_build }}
           path: apps/yaoxiaobai/yaoxiaobai_app/build/app/outputs/bundle/release/app-release.aab
           if-no-files-found: ignore
-          retention-days: 30
+          retention-days: 1
 
   footprint-play:
     name: footprint-play-aab
@@ -861,7 +861,7 @@ jobs:
           name: footprint-play-aab-${{ needs.validate.outputs.footprint_version }}-${{ needs.validate.outputs.footprint_build }}
           path: apps/footprint/build/app/outputs/bundle/release/app-release.aab
           if-no-files-found: ignore
-          retention-days: 30
+          retention-days: 1
 
   mailbox-play:
     name: mailbox-play-aab
@@ -939,7 +939,7 @@ jobs:
           name: mailbox-play-aab-${{ needs.validate.outputs.newapp_version }}-${{ needs.validate.outputs.newapp_build }}
           path: apps/mail-box/build/app/outputs/bundle/release/app-release.aab
           if-no-files-found: ignore
-          retention-days: 30
+          retention-days: 1
 
   adminapp-play:
     name: adminapp-play-aab
@@ -1017,7 +1017,7 @@ jobs:
           name: adminapp-play-aab-${{ needs.validate.outputs.newapp_version }}-${{ needs.validate.outputs.newapp_build }}
           path: apps/admin-app/build/app/outputs/bundle/release/app-release.aab
           if-no-files-found: ignore
-          retention-days: 30
+          retention-days: 1
 
   watertracker-android:
     name: watertracker-android-arm64
@@ -1153,7 +1153,7 @@ jobs:
           name: watertracker-play-aab-${{ needs.validate.outputs.newapp_version }}-${{ needs.validate.outputs.newapp_build }}
           path: apps/water-tracker/build/app/outputs/bundle/release/app-release.aab
           if-no-files-found: ignore
-          retention-days: 30
+          retention-days: 1
 
   release:
     name: create-github-release

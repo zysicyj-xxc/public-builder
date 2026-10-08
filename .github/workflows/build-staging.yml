@@ -1,89 +1,514 @@
-# Temporary: read staging script parameters. Not part of the final workflow.
+# Staging packages for daymica and password-vault only.
+# Trust boundary: workflow_dispatch inputs and repository_dispatch client_payload are untrusted.
+# ref/sha pass through resolve-private-ref before checkout. Checkout uses
+# PRIVATE_REPO_ACCESS_TOKEN and persist-credentials: false.
+# Signing secrets are STAGING_ANDROID_* only. Missing staging keystore falls
+# back to the Android debug certificate inside the private staging script.
+# upload defaults to false. RustFS layout is not confirmed, and the staging
+# scripts themselves do not upload or register a version.
+# This workflow does not create tags, GitHub Releases, or CNB builds.
+# repository_dispatch type is staging-build (not the production trigger-build).
+
 name: Staging Builds
 
 on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: 'daymica or password-vault'
+        required: true
+        type: choice
+        options:
+          - daymica
+          - password-vault
+      ref:
+        description: 'Git ref of zysicyj-xxc/zysicyj (default main)'
+        required: false
+        default: main
+        type: string
+      sha:
+        description: 'Commit SHA (optional; wins over ref)'
+        required: false
+        type: string
+      upload:
+        description: 'Upload to RustFS public/releases-staging/<app>/'
+        required: false
+        default: false
+        type: boolean
+  repository_dispatch:
+    types: [staging-build]
+  # Temporary verification trigger. Removed after the proof runs.
   pull_request:
 
 permissions:
   contents: read
 
+concurrency:
+  group: staging-${{ github.event_name }}-${{ github.event.inputs.app || github.event.client_payload.app || github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: pwsh
+
 jobs:
-  inspect:
-    name: inspect-staging-scripts
+  guard:
+    name: guard
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      ref: ${{ steps.resolve.outputs.ref }}
+      upload: ${{ steps.norm.outputs.upload }}
+      apps: ${{ steps.norm.outputs.apps }}
     steps:
       - name: Checkout public-builder
         uses: actions/checkout@v4
 
-      - name: Allowlist ref
+      - name: Reject production signing secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          file="$GITHUB_WORKSPACE/.github/workflows/build-staging.yml"
+          # Assemble needles so this file does not contain a production secret name.
+          ks=$(printf '%s%s%s' 'ANDROID_' 'KEYSTORE_' 'BASE64')
+          sp=$(printf '%s%s' 'STORE_' 'PASSWORD')
+          fp=$(printf '%s%s%s' 'FP_' 'KEYSTORE_' 'B64')
+          staging_ks=$(printf '%s%s' 'STAGING_' "$ks")
+          if grep -n -- "$ks" "$file" | grep -v -- "$staging_ks"; then
+            echo "production signing secret name in workflow" >&2
+            exit 1
+          fi
+          if grep -nE "(^|[^A-Z0-9])([A-Z0-9]+_)?${sp}" "$file"; then
+            echo "production store password secret name in workflow" >&2
+            exit 1
+          fi
+          if grep -nF -- "$fp" "$file"; then
+            echo "production keystore secret name in workflow" >&2
+            exit 1
+          fi
+          python3 - "$file" <<'PY'
+          import re, sys
+          text = open(sys.argv[1], encoding="utf-8").read()
+          allowed = {
+              "PRIVATE_REPO_ACCESS_TOKEN",
+              "STAGING_ANDROID_KEYSTORE_BASE64",
+              "STAGING_ANDROID_KEYSTORE_PASSWORD",
+              "STAGING_ANDROID_KEY_ALIAS",
+              "STAGING_ANDROID_KEY_PASSWORD",
+              "DAYMICA_RUSTFS_ACCESS_KEY",
+              "DAYMICA_RUSTFS_SECRET_KEY",
+          }
+          bad = []
+          for match in re.finditer(r"secrets\.([A-Z0-9_]+)", text):
+              name = match.group(1)
+              if name not in allowed:
+                  line = text.count("\n", 0, match.start()) + 1
+                  bad.append(f"{line}:{name}")
+          if bad:
+              print("secret not allowlisted:", *bad, sep="\n", file=sys.stderr)
+              sys.exit(1)
+          print("signing secret self-check ok")
+          PY
+
+      - name: Allowlist inputs
+        id: norm
+        shell: bash
+        env:
+          RAW_APP: ${{ github.event.inputs.app || github.event.client_payload.app }}
+          RAW_UPLOAD: ${{ github.event.inputs.upload || github.event.client_payload.upload }}
+        run: |
+          set -euo pipefail
+          upload="${RAW_UPLOAD:-}"
+          app="${RAW_APP:-}"
+          case "$GITHUB_EVENT_NAME" in
+            pull_request)
+              upload=false
+              echo "apps=,daymica,password-vault," >> "$GITHUB_OUTPUT"
+              ;;
+            workflow_dispatch|repository_dispatch)
+              case "$app" in
+                daymica|password-vault) ;;
+                *) echo "app failed allowlist" >&2; exit 1 ;;
+              esac
+              case "$upload" in
+                true|false) ;;
+                "") upload=false ;;
+                *) echo "upload failed allowlist" >&2; exit 1 ;;
+              esac
+              echo "apps=,$app," >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "event failed allowlist" >&2
+              exit 1
+              ;;
+          esac
+          echo "upload=$upload" >> "$GITHUB_OUTPUT"
+
+      - name: Allowlist ref/sha
         id: resolve
         uses: ./.github/actions/resolve-private-ref
         with:
-          ref: main
+          ref: ${{ github.event_name == 'pull_request' && 'main' || github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+          sha: ${{ github.event_name != 'pull_request' && (github.event.inputs.sha || github.event.client_payload.sha) || '' }}
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
 
+  android:
+    name: android-${{ matrix.app }}
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - app: daymica
+            java: '21'
+          - app: password-vault
+            java: '17'
+    steps:
       - name: Checkout private repo
+        if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
         uses: actions/checkout@v4
         with:
           repository: zysicyj-xxc/zysicyj
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          ref: ${{ steps.resolve.outputs.sha }}
-          path: private
+          ref: ${{ needs.guard.outputs.sha }}
           persist-credentials: false
           fetch-depth: 1
 
-      - name: Print parameter interface
-        working-directory: private
+      - uses: actions/setup-java@v4
+        if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+
+      - uses: subosito/flutter-action@v2
+        if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
+        with:
+          flutter-version: '3.44.8'
+          channel: stable
+          cache: true
+
+      - name: Cache shared Gradle
+        if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: Linux-gradle-shared-v2
+          restore-keys: |
+            Linux-gradle-shared-
+
+      - name: Cache dart_tool
+        if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
+        uses: actions/cache@v4
+        with:
+          path: |
+            apps/${{ matrix.app }}/.dart_tool
+            apps/shared_package/.dart_tool
+          key: ${{ runner.os }}-darttool-${{ matrix.app }}-${{ hashFiles(format('apps/{0}/pubspec.lock', matrix.app)) }}
+          restore-keys: |
+            ${{ runner.os }}-darttool-${{ matrix.app }}-
+
+      - name: Build staging APK
+        if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
+        env:
+          APP_SLUG: ${{ matrix.app }}
+          STAGING_ANDROID_KEYSTORE_BASE64: ${{ secrets.STAGING_ANDROID_KEYSTORE_BASE64 }}
+          STAGING_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.STAGING_ANDROID_KEYSTORE_PASSWORD }}
+          STAGING_ANDROID_KEY_ALIAS: ${{ secrets.STAGING_ANDROID_KEY_ALIAS }}
+          STAGING_ANDROID_KEY_PASSWORD: ${{ secrets.STAGING_ANDROID_KEY_PASSWORD }}
         run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import pathlib, re
-          root = pathlib.Path('.')
-          scripts = sorted(root.glob('scripts/**/*.ps1'))
-          print('script_count', len(scripts))
-          key = re.compile(r'staging|Channel|Upload|Skip|releases|AppSlug|keystore|Debug|applicationId|version|RustFS|param\b', re.I)
-          secretish = re.compile(r'(password|secret|token|keystore)\s*=\s*["\'][^"\']+["\']', re.I)
-          for p in scripts:
-              text = p.read_text(encoding='utf-8', errors='replace')
-              if not re.search(r'staging|\$Channel|\[string\]\$Channel|-Channel', text, re.I):
-                  continue
-              print('FILE', p.as_posix(), 'lines', text.count('\n') + 1)
-              lines = text.splitlines()
-              # param block only, plus keyword lines outside it
-              start = None
-              for i, line in enumerate(lines):
-                  if start is None and re.match(r'\s*param\s*\(', line):
-                      start = i
-                  if start is not None:
-                      if secretish.search(line):
-                          print(f'{i+1}: <redacted>')
-                      else:
-                          print(f'{i+1}: {line[:300]}')
-                      if i > start and line.strip() == ')':
-                          break
-              for i, line in enumerate(lines):
-                  if not key.search(line):
-                      continue
-                  if secretish.search(line):
-                      print(f'K {i+1}: <redacted>')
-                      continue
-                  print(f'K {i+1}: {line[:300]}')
-          print('--- gradle staging lines ---')
-          for p in root.glob('apps/**/*'):
-              if p.suffix not in {'.kts', '.xml', '.gradle', '.properties'} or not p.is_file():
-                  continue
-              try:
-                  text = p.read_text(encoding='utf-8', errors='replace')
-              except OSError:
-                  continue
-              if 'staging' not in text.lower() and 'app_name_staging' not in text:
-                  continue
-              rel = p.as_posix()
-              if not rel.startswith('apps/daymica/') and not rel.startswith('apps/password-vault/'):
-                  continue
-              print('GRADLE', rel)
-              for i, line in enumerate(text.splitlines(), 1):
-                  if re.search(r'staging|applicationId|app_name', line, re.I):
-                      print(f'{i}: {line[:300]}')
-          PY
+          $ErrorActionPreference = 'Stop'
+          if ($env:APP_SLUG -notin @('daymica', 'password-vault')) { throw 'app failed allowlist' }
+          $env:TMPDIR = $env:RUNNER_TEMP
+          $env:TEMP = $env:RUNNER_TEMP
+          $env:TMP = $env:RUNNER_TEMP
+          & ./scripts/build-flutter-android-staging.ps1 -AppSlug $env:APP_SLUG
+          if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Check package name and certificate
+        if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
+        env:
+          APP_SLUG: ${{ matrix.app }}
+          RESOLVED_SHA: ${{ needs.guard.outputs.sha }}
+          STAGING_UPLOAD: ${{ needs.guard.outputs.upload }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $app = $env:APP_SLUG
+          if ($app -notin @('daymica', 'password-vault')) { throw 'app failed allowlist' }
+          $sdk = if ($env:ANDROID_SDK_ROOT) { $env:ANDROID_SDK_ROOT } else { $env:ANDROID_HOME }
+          if (-not $sdk) { throw 'ANDROID_HOME missing' }
+          $bt = Get-ChildItem -LiteralPath (Join-Path $sdk 'build-tools') -Directory |
+            Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $bt) { throw 'build-tools missing' }
+          $aapt = Join-Path $bt.FullName 'aapt'
+          $apksigner = Join-Path $bt.FullName 'apksigner'
+          if (-not (Test-Path -LiteralPath $aapt)) { throw 'aapt missing' }
+          if (-not (Test-Path -LiteralPath $apksigner)) { throw 'apksigner missing' }
+
+          $apks = @(Get-ChildItem -Path (Join-Path 'apps' $app) -Recurse -Filter *.apk -File |
+            Where-Object { $_.FullName -match 'outputs[/\\]flutter-apk[/\\]' -and $_.Name -notmatch 'unaligned|unsigned' })
+          $found = @()
+          foreach ($apk in $apks) {
+            $badging = @(& $aapt dump badging $apk.FullName)
+            if ($LASTEXITCODE -ne 0) { throw 'aapt dump badging failed' }
+            $line = @($badging | Where-Object { $_ -like 'package:*' } | Select-Object -First 1)
+            if (-not $line) { continue }
+            if ($line -notmatch "name='([^']+)'") { continue }
+            $pkg = $Matches[1]
+            if (-not $pkg.EndsWith('.staging')) { continue }
+            $ver = ''
+            $code = ''
+            if ($line -match "versionName='([^']*)'") { $ver = $Matches[1] }
+            if ($line -match "versionCode='([^']*)'") { $code = $Matches[1] }
+            $found += [pscustomobject]@{ Apk = $apk; Package = $pkg; Version = $ver; Code = $code }
+          }
+          if ($found.Count -ne 1) { throw "expected one .staging apk, found $($found.Count)" }
+          $chosen = $found[0]
+
+          $certLines = @(& $apksigner verify --print-certs $chosen.Apk.FullName)
+          if ($LASTEXITCODE -ne 0) { throw 'apksigner verify failed' }
+          $dnLine = @($certLines | Where-Object { $_ -match 'certificate DN:' } | Select-Object -First 1)
+          $fpLine = @($certLines | Where-Object { $_ -match 'certificate SHA-256 digest:' } | Select-Object -First 1)
+          if ($dnLine -notmatch 'certificate DN:\s*(.+)$') { throw 'certificate DN missing' }
+          $subject = $Matches[1].Trim()
+          $debug = $subject -match '(?i)(^|,\s*)CN\s*=\s*Android Debug\s*(,|$)'
+          $stagingId = $subject -match '(?i)staging'
+          if (-not ($debug -or $stagingId)) {
+            throw 'certificate subject is not Android Debug and has no staging marker'
+          }
+          if ($fpLine -notmatch 'certificate SHA-256 digest:\s*(\S+)') { throw 'certificate SHA-256 missing' }
+          $fp = $Matches[1]
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $chosen.Apk.FullName).Hash.ToLowerInvariant()
+
+          Write-Host "package=$($chosen.Package)"
+          Write-Host "version=$($chosen.Version)"
+          Write-Host "version_code=$($chosen.Code)"
+          Write-Host "cert_dn=$subject"
+          Write-Host "cert_sha256=$fp"
+          Write-Host "sha256=$hash"
+          Write-Host "file=$($chosen.Apk.Name)"
+
+          $summary = Join-Path $env:RUNNER_TEMP 'staging-build-summary.txt'
+          @(
+            "app=$app"
+            'platform=android'
+            "package=$($chosen.Package)"
+            "version=$($chosen.Version)"
+            "version_code=$($chosen.Code)"
+            "sha256=$hash"
+            "cert_dn=$subject"
+            "cert_sha256=$fp"
+            "file=$($chosen.Apk.Name)"
+            "ref=$($env:RESOLVED_SHA)"
+            "upload=$($env:STAGING_UPLOAD)"
+          ) | Set-Content -LiteralPath $summary -Encoding utf8NoBOM
+          Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'staging-artifact-path.txt') -Value $chosen.Apk.FullName -Encoding utf8NoBOM
+
+      - name: Upload staging object
+        if: needs.guard.outputs.upload == 'true' && contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
+        env:
+          APP_SLUG: ${{ matrix.app }}
+          STAGING_UPLOAD: ${{ needs.guard.outputs.upload }}
+          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+          DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:STAGING_UPLOAD -ne 'true') { throw 'refusing upload' }
+          $app = $env:APP_SLUG
+          if ($app -notin @('daymica', 'password-vault')) { throw 'app failed allowlist' }
+          $path = (Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'staging-artifact-path.txt') -Raw).Trim()
+          if (-not (Test-Path -LiteralPath $path)) { throw 'artifact missing' }
+          $leaf = Split-Path -Leaf $path
+          $key = "public/releases-staging/$app/$leaf"
+          if ($key -notmatch '^public/releases-staging/(daymica|password-vault)/[A-Za-z0-9._+-]+$') {
+            throw 'upload key failed allowlist'
+          }
+          . ./scripts/lib/lib-rustfs-upload.ps1
+          $null = Get-RustFsConfig
+          Write-Host "STAGING upload key=$key"
+          Publish-RustFsObject -Key $key -FilePath $path -Required | Out-Null
+
+      - name: Delete staging keystore
+        if: always() && contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $dirs = @($env:RUNNER_TEMP, $env:TEMP, $env:TMP, '/tmp')
+          $removed = $false
+          foreach ($dir in $dirs) {
+            if (-not $dir) { continue }
+            $path = Join-Path $dir 'zysicyj-staging-android.jks'
+            if (Test-Path -LiteralPath $path) {
+              Remove-Item -LiteralPath $path -Force
+              $removed = $true
+            }
+          }
+          if ($removed) { Write-Host 'removed staging keystore' } else { Write-Host 'no staging keystore file' }
+
+      - name: Upload summary
+        if: success() && contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-build-summary-${{ matrix.app }}-android
+          path: ${{ runner.temp }}/staging-build-summary.txt
+          retention-days: 1
+          if-no-files-found: error
+
+  windows:
+    name: windows-${{ matrix.app }}
+    needs: guard
+    runs-on: windows-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - app: daymica
+          - app: password-vault
+    steps:
+      - name: Checkout private repo
+        if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
+        uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.guard.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - uses: subosito/flutter-action@v2
+        if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
+        with:
+          flutter-version: '3.44.8'
+          channel: stable
+          cache: true
+
+      - name: Ensure Inno Setup
+        if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $iscc = @(
+            $env:INNO_SETUP_ISCC,
+            (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'),
+            (Join-Path $env:ProgramFiles 'Inno Setup 6\ISCC.exe'),
+            (Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6\ISCC.exe')
+          ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+          if (-not $iscc) {
+            choco install innosetup --no-progress -y
+          }
+
+      - name: Cache windows build + dart_tool
+        if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
+        uses: actions/cache@v4
+        with:
+          path: |
+            apps/${{ matrix.app }}/.dart_tool
+            apps/shared_package/.dart_tool
+            apps/${{ matrix.app }}/build/windows
+            apps/${{ matrix.app }}/windows/flutter/ephemeral
+          key: ${{ runner.os }}-windows-inc-v2-${{ matrix.app }}-${{ hashFiles(format('apps/{0}/pubspec.lock', matrix.app)) }}
+          restore-keys: |
+            ${{ runner.os }}-windows-inc-v2-${{ matrix.app }}-
+
+      - name: Build staging Windows package
+        if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
+        env:
+          APP_SLUG: ${{ matrix.app }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:APP_SLUG -notin @('daymica', 'password-vault')) { throw 'app failed allowlist' }
+          & ./scripts/build-flutter-windows-staging.ps1 -NoClean -AppSlug $env:APP_SLUG
+          if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Record Windows summary
+        if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
+        env:
+          APP_SLUG: ${{ matrix.app }}
+          RESOLVED_SHA: ${{ needs.guard.outputs.sha }}
+          STAGING_UPLOAD: ${{ needs.guard.outputs.upload }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $app = $env:APP_SLUG
+          if ($app -notin @('daymica', 'password-vault')) { throw 'app failed allowlist' }
+          $pub = Join-Path "apps/$app" 'pubspec.yaml'
+          $versionLine = @(Select-String -LiteralPath $pub -Pattern '^version:\s*\S+' | Select-Object -First 1)
+          if (-not $versionLine) { throw 'pubspec version missing' }
+          $version = ($versionLine.Line -replace '^version:\s*', '').Trim()
+          $all = @(Get-ChildItem -Path "apps/$app" -Recurse -File -Include *.exe, *.zip -ErrorAction SilentlyContinue |
+            Where-Object {
+              $_.Length -gt 500KB -and
+              $_.FullName -notmatch '[\\/]flutter[\\/]' -and
+              $_.FullName -notmatch '[\\/]\.dart_tool[\\/]' -and
+              $_.Name -notmatch '^(flutter|dart)\.exe$'
+            })
+          $installer = @($all | Where-Object { $_.FullName -notmatch '[\\/]build[\\/]windows[\\/]' })
+          $pool = if ($installer.Count -gt 0) { $installer } else { $all }
+          $pick = $pool | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $pick) { throw 'no windows artifact' }
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $pick.FullName).Hash.ToLowerInvariant()
+          Write-Host "package="
+          Write-Host "version=$version"
+          Write-Host "sha256=$hash"
+          Write-Host "file=$($pick.Name)"
+          Write-Host "cert_dn="
+          Write-Host "cert_sha256="
+          $summary = Join-Path $env:RUNNER_TEMP 'staging-build-summary.txt'
+          @(
+            "app=$app"
+            'platform=windows'
+            'package='
+            "version=$version"
+            "sha256=$hash"
+            'cert_dn='
+            'cert_sha256='
+            "file=$($pick.Name)"
+            "ref=$($env:RESOLVED_SHA)"
+            "upload=$($env:STAGING_UPLOAD)"
+          ) | Set-Content -LiteralPath $summary -Encoding utf8NoBOM
+          Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'staging-artifact-path.txt') -Value $pick.FullName -Encoding utf8NoBOM
+
+      - name: Upload staging object
+        if: needs.guard.outputs.upload == 'true' && contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
+        env:
+          APP_SLUG: ${{ matrix.app }}
+          STAGING_UPLOAD: ${{ needs.guard.outputs.upload }}
+          RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+          DAYMICA_RUSTFS_ACCESS_KEY: ${{ secrets.DAYMICA_RUSTFS_ACCESS_KEY }}
+          DAYMICA_RUSTFS_SECRET_KEY: ${{ secrets.DAYMICA_RUSTFS_SECRET_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:STAGING_UPLOAD -ne 'true') { throw 'refusing upload' }
+          $app = $env:APP_SLUG
+          if ($app -notin @('daymica', 'password-vault')) { throw 'app failed allowlist' }
+          $path = (Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'staging-artifact-path.txt') -Raw).Trim()
+          if (-not (Test-Path -LiteralPath $path)) { throw 'artifact missing' }
+          $leaf = Split-Path -Leaf $path
+          $key = "public/releases-staging/$app/$leaf"
+          if ($key -notmatch '^public/releases-staging/(daymica|password-vault)/[A-Za-z0-9._+-]+$') {
+            throw 'upload key failed allowlist'
+          }
+          . ./scripts/lib/lib-rustfs-upload.ps1
+          $null = Get-RustFsConfig
+          Write-Host "STAGING upload key=$key"
+          Publish-RustFsObject -Key $key -FilePath $path -Required | Out-Null
+
+      - name: Upload summary
+        if: success() && contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-build-summary-${{ matrix.app }}-windows
+          path: ${{ runner.temp }}/staging-build-summary.txt
+          retention-days: 1
+          if-no-files-found: error

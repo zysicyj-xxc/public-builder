@@ -1,0 +1,260 @@
+# Scripts test gate for zysicyj-xxc/zysicyj.
+# Trust boundary: repository_dispatch client_payload and workflow_dispatch inputs are untrusted.
+# Allowlist ref/sha before any API call. Status posts run in a separate job so
+# PRIVATE_REPO_ACCESS_TOKEN is not on the runner that executes private-repo code.
+#
+# Contexts match the paused private Scripts Test Gate: one check named
+# "layout + domain gates" (assert-scripts-layout.ps1 + assert-domain-registry.ps1)
+# and one check per scripts/**/*.tests.ps1. assert-domain-registry.ps1 stays here
+# because it is part of that combined check. The separate domain-gate listener
+# is a different workflow and is not folded into this one.
+#
+# Tests that need a desktop, an external service, or that would print credential
+# material are skipped. Their status is success with description skipped-*.
+# Runner output is paths, exit codes, and those reasons. Secret-shaped output
+# is dropped before it is logged.
+
+name: Scripts Gate
+
+on:
+  repository_dispatch:
+    types: [scripts-gate]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref or SHA of zysicyj-xxc/zysicyj'
+        required: true
+        type: string
+      sha:
+        description: 'Commit SHA for checkout and status (default: resolve ref)'
+        required: false
+        type: string
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scripts-gate-${{ github.event.client_payload.sha || github.event.inputs.sha || github.event.client_payload.ref || github.event.inputs.ref || github.event.pull_request.head.sha || github.run_id }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  meta:
+    name: resolve-payload
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      ref: ${{ steps.resolve.outputs.ref }}
+      tests: ${{ steps.list.outputs.tests }}
+    steps:
+      - name: Checkout public-builder
+        uses: actions/checkout@v4
+
+      - name: Self-check classifier
+        run: python3 .github/scripts/scripts_gate_run.py --selftest
+
+      - name: Allowlist ref/sha
+        id: resolve
+        uses: ./.github/actions/resolve-private-ref
+        with:
+          ref: ${{ github.event.client_payload.ref || github.event.inputs.ref || (github.event_name == 'pull_request' && 'main' || '') }}
+          sha: ${{ github.event.client_payload.sha || github.event.inputs.sha }}
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+
+      - name: List script checks
+        id: list
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          trap 'rm -f "$RUNNER_TEMP/tree.json"' EXIT
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "ERROR: sha failed allowlist" >&2
+            exit 1
+          fi
+          gh api "repos/zysicyj-xxc/zysicyj/git/trees/${SHA}?recursive=1" > "$RUNNER_TEMP/tree.json"
+          python3 .github/scripts/scripts_gate_run.py --from-tree "$RUNNER_TEMP/tree.json" "$GITHUB_OUTPUT"
+
+      - name: Set pending statuses
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+          TESTS_JSON: ${{ steps.list.outputs.tests }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "ERROR: sha failed allowlist" >&2
+            exit 1
+          fi
+          post() {
+            gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
+              -f state="pending" \
+              -f target_url="${RUN_URL}" \
+              -f description="running on public-builder" \
+              -f context="$1" >/dev/null
+          }
+          post "layout + domain gates"
+          echo "$TESTS_JSON" | jq -er '.[]' | while IFS= read -r ctx; do
+            if ! printf '%s' "$ctx" | grep -Eq '^scripts/([A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\.tests\.ps1$'; then
+              echo "ERROR: test path failed allowlist" >&2
+              exit 1
+            fi
+            post "$ctx"
+          done
+
+      - name: Post failure when resolve fails
+        if: failure()
+        env:
+          RESOLVED_SHA: ${{ steps.resolve.outputs.sha }}
+          RAW_SHA: ${{ github.event.client_payload.sha || github.event.inputs.sha }}
+          TESTS_JSON: ${{ steps.list.outputs.tests }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          sha=$(printf '%s' "${RESOLVED_SHA:-}" | tr 'A-F' 'a-f' | tr -d '[:space:]')
+          if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
+            sha=$(printf '%s' "${RAW_SHA:-}" | tr 'A-F' 'a-f' | tr -d '[:space:]')
+          fi
+          if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "no allowlisted sha; dispatcher pending left in place"
+            exit 0
+          fi
+          post() {
+            gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${sha}" \
+              -f state="failure" \
+              -f target_url="${RUN_URL}" \
+              -f description="payload rejected" \
+              -f context="$1" >/dev/null
+          }
+          post "layout + domain gates"
+          if [ -n "${TESTS_JSON:-}" ]; then
+            echo "$TESTS_JSON" | jq -r '.[]?' | while IFS= read -r ctx; do
+              [ -n "$ctx" ] || continue
+              if printf '%s' "$ctx" | grep -Eq '^scripts/([A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\.tests\.ps1$'; then
+                post "$ctx"
+              fi
+            done
+          fi
+
+  verify:
+    name: scripts gate
+    needs: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Checkout public-builder
+        uses: actions/checkout@v4
+        with:
+          path: runner
+
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.meta.outputs.sha }}
+          path: repo
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Run layout, domain, and script tests
+        working-directory: repo
+        env:
+          TESTS_JSON: ${{ needs.meta.outputs.tests }}
+          RESULTS_PATH: ${{ runner.temp }}/results.tsv
+        run: python3 "$GITHUB_WORKSPACE/runner/.github/scripts/scripts_gate_run.py" --run
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scripts-gate-results
+          path: ${{ runner.temp }}/results.tsv
+          if-no-files-found: warn
+
+  report:
+    name: post-statuses
+    needs: [meta, verify]
+    if: always() && needs.meta.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Download results
+        if: always()
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: scripts-gate-results
+          path: gate-results
+
+      - name: Post conclusions
+        env:
+          SHA: ${{ needs.meta.outputs.sha }}
+          TESTS_JSON: ${{ needs.meta.outputs.tests }}
+          VERIFY_RESULT: ${{ needs.verify.result }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "ERROR: sha failed allowlist" >&2
+            exit 1
+          fi
+          declare -A got_state=()
+          declare -A got_desc=()
+          if [ -f gate-results/results.tsv ]; then
+            while IFS=$'\t' read -r ctx state desc; do
+              [ -n "${ctx:-}" ] || continue
+              case "$state" in
+                success|failure) ;;
+                *) continue ;;
+              esac
+              case "$desc" in
+                success|failure|skipped-desktop|skipped-external|skipped-sensitive) ;;
+                *) continue ;;
+              esac
+              if [ "$state" = failure ] && [ "$desc" != failure ]; then
+                continue
+              fi
+              got_state["$ctx"]=$state
+              got_desc["$ctx"]=$desc
+            done < gate-results/results.tsv
+          fi
+          post() {
+            local ctx="$1" state="$2" desc="$3"
+            echo "status ${ctx} ${state} ${desc}"
+            gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
+              -f state="$state" \
+              -f target_url="${RUN_URL}" \
+              -f description="$desc" \
+              -f context="$ctx" >/dev/null
+          }
+          post_one() {
+            local ctx="$1"
+            if [ -n "${got_state[$ctx]:-}" ]; then
+              post "$ctx" "${got_state[$ctx]}" "${got_desc[$ctx]}"
+            elif [ "$VERIFY_RESULT" = cancelled ]; then
+              post "$ctx" failure cancelled
+            else
+              post "$ctx" failure failure
+            fi
+          }
+          post_one "layout + domain gates"
+          echo "$TESTS_JSON" | jq -er '.[]' | while IFS= read -r ctx; do
+            if ! printf '%s' "$ctx" | grep -Eq '^scripts/([A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\.tests\.ps1$'; then
+              echo "ERROR: test path failed allowlist" >&2
+              exit 1
+            fi
+            post_one "$ctx"
+          done

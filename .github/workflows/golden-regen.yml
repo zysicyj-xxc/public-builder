@@ -185,7 +185,13 @@ jobs:
                   emit("MSG", message or "(no message)")
                   emit("FRAME", frame or "(no frame)")
               i += 1
-          print(f"fail_count={len(seen_fail)} exc_count={len(seen_exc)}")
+          seen_tf = set()
+          for line in lines:
+              text = line.strip()
+              if text.startswith("#") and "_test.dart" in text and text not in seen_tf:
+                  seen_tf.add(text)
+                  emit("TESTFRAME", text)
+          print(f"fail_count={len(seen_fail)} exc_count={len(seen_exc)} testframe_count={len(seen_tf)}")
           PY
 
           pack="${RUNNER_TEMP}/golden-pack"

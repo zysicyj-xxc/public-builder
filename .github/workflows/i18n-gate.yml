@@ -5,6 +5,9 @@
 #
 # The private script is one process (scripts/ci-verify-l10n-gates.ps1). Each
 # i18n-gate (<app>) context mirrors that single exit code.
+# It Push-Locations into each app and runs `flutter test --no-pub test/l10n`
+# without pub get. A fresh checkout has no package_config, so flutter test
+# reports a missing flutter_test dependency for every app. pub get first.
 # Flutter 3.44.8 is on PATH in case the script shells out to flutter.
 
 name: i18n Gate
@@ -135,6 +138,22 @@ jobs:
           flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
+      - name: pub get for l10n packages
+        run: |
+          set -euo pipefail
+          mapfile -t dirs < <(find apps \( -path '*/test/l10n' -o -path '*/test/l10n.dart' \) -printf '%h\n' | sed 's|/test$||' | sort -u)
+          if [ "${#dirs[@]}" -eq 0 ]; then
+            echo "ERROR: no test/l10n entrypoints" >&2
+            exit 1
+          fi
+          for dir in "${dirs[@]}"; do
+            if [ ! -f "${dir}/pubspec.yaml" ]; then
+              echo "ERROR: ${dir} has test/l10n but no pubspec.yaml" >&2
+              exit 1
+            fi
+            echo "== pub get ${dir} =="
+            (cd "${dir}" && flutter pub get)
+          done
       - name: l10n gates
         shell: pwsh
         run: |

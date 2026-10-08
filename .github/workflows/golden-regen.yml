@@ -150,14 +150,13 @@ jobs:
               message = ""
               frame = ""
               test_frame = ""
-              for nxt in lines[i + 1 : i + 40]:
+              for nxt in lines[i + 1 : i + 120]:
                   text = nxt.strip()
                   if not text or text.startswith("##[") or text.startswith("══"):
                       continue
-                  if "/test/" in text and "_test.dart" in text and not test_frame:
+                  if "_test.dart" in text and not test_frame:
                       test_frame = text
-                  is_frame = text.startswith("#") or text.startswith("package:")
-                  if is_frame:
+                  if text.startswith("#") or text.startswith("package:"):
                       if not frame:
                           frame = text
                       if test_frame:
@@ -167,8 +166,16 @@ jobs:
                       continue
                   if text.startswith(("└", "│", "├", "[")):
                       continue
-                  if not message:
+                  if not message and (
+                      text.startswith(("Bad state:", "Expected:", "Actual:", "No ", "Failed"))
+                      or "Exception" in text
+                      or "Error" in text
+                  ):
                       message = text
+                      continue
+                  if message.startswith("Expected:") and text.startswith("Actual:"):
+                      message = message + " " + text
+                      break
               if test_frame:
                   frame = test_frame
               key = (kind, message, frame)

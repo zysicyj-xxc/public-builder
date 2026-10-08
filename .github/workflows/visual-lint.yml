@@ -29,7 +29,6 @@ on:
         description: 'Commit SHA for checkout and status (default: resolve ref)'
         required: false
         type: string
-  pull_request:
 
 permissions:
   contents: read
@@ -59,8 +58,8 @@ jobs:
         id: resolve
         uses: ./.github/actions/resolve-private-ref
         with:
-          ref: ${{ github.event_name == 'pull_request' && 'af20c510e81919ff417746824e44a73d2e8d6f8a' || github.event.client_payload.ref || github.event.inputs.ref }}
-          sha: ${{ github.event_name == 'pull_request' && 'af20c510e81919ff417746824e44a73d2e8d6f8a' || github.event.client_payload.sha || github.event.inputs.sha }}
+          ref: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
+          sha: ${{ github.event.client_payload.sha || github.event.inputs.sha }}
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
 
       - name: Set pending statuses

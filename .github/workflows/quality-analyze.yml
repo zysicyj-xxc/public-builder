@@ -8,6 +8,8 @@
 name: Quality Analyze
 
 on:
+  # Temporary: prove this revision against private main. Remove after the run.
+  pull_request:
   repository_dispatch:
     types: [quality-analyze]
   workflow_dispatch:
@@ -58,6 +60,12 @@ jobs:
           GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
         run: |
           set -euo pipefail
+          # Temporary pull_request path: resolve private main, all scopes. Remove after the run.
+          if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ]; then
+            RAW_REF="refs/heads/main"
+            RAW_SHA=""
+            RAW_SCOPES=""
+          fi
 
           fail() { echo "ERROR: $*" >&2; exit 1; }
 

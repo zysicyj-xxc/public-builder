@@ -10,6 +10,7 @@
 name: i18n Gate
 
 on:
+  pull_request:
   repository_dispatch:
     types: [i18n-gate]
   workflow_dispatch:
@@ -35,8 +36,62 @@ defaults:
     shell: bash
 
 jobs:
+  probe:
+    name: probe-l10n-layout
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: 06a7138d68a3646f65838d8a2b1c1b3d4a36a832
+          persist-credentials: false
+          fetch-depth: 1
+      - name: flags only
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $script = './scripts/ci-verify-l10n-gates.ps1'
+          $text = Get-Content -LiteralPath $script -Raw
+          $flags = @(
+            'no-pub', 'dart test', 'flutter test', 'flutter pub get', 'dart pub get',
+            'Set-Location', 'Push-Location', 'gen-l10n', 'untranslated', 'package:test'
+          )
+          foreach ($f in $flags) {
+            Write-Host ("flag {0}={1}" -f $f, $text.Contains($f))
+          }
+          Write-Host ("root_pubspec={0}" -f (Test-Path -LiteralPath './pubspec.yaml'))
+          Write-Host ("root_package_config={0}" -f (Test-Path -LiteralPath './.dart_tool/package_config.json'))
+          if (Test-Path -LiteralPath './pubspec.yaml') {
+            $root = Get-Content -LiteralPath './pubspec.yaml' -Raw
+            Write-Host ("root_workspace={0}" -f $root.Contains('workspace:'))
+            Write-Host ("root_resolution={0}" -f $root.Contains('resolution:'))
+            Write-Host ("root_flutter_test={0}" -f $root.Contains('flutter_test'))
+          }
+          $apps = @(
+            'apps/daymica', 'apps/mail-box', 'apps/password-vault',
+            'apps/yaoxiaobai/yaoxiaobai_app', 'apps/eye-care', 'apps/footprint',
+            'apps/water-tracker', 'apps/admin-app', 'apps/shared_package'
+          )
+          foreach ($d in $apps) {
+            $pub = Join-Path $d 'pubspec.yaml'
+            $pc = Join-Path $d '.dart_tool/package_config.json'
+            $hasPub = Test-Path -LiteralPath $pub
+            $hasFt = $false
+            $res = $false
+            if ($hasPub) {
+              $body = Get-Content -LiteralPath $pub -Raw
+              $hasFt = $body.Contains('flutter_test')
+              $res = $body.Contains('resolution:')
+            }
+            Write-Host ("app {0} pubspec={1} flutter_test={2} resolution={3} package_config={4}" -f $d, $hasPub, $hasFt, $res, (Test-Path -LiteralPath $pc))
+          }
+
   meta:
     name: resolve-payload
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:

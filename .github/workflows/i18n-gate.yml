@@ -13,8 +13,6 @@
 name: i18n Gate
 
 on:
-  # temporary proof trigger; remove after the verification run
-  pull_request:
   repository_dispatch:
     types: [i18n-gate]
   workflow_dispatch:
@@ -56,8 +54,8 @@ jobs:
         id: resolve
         uses: ./.github/actions/resolve-private-ref
         with:
-          ref: ${{ github.event_name == 'pull_request' && 'af20c510e81919ff417746824e44a73d2e8d6f8a' || github.event.client_payload.ref || github.event.inputs.ref }}
-          sha: ${{ github.event_name == 'pull_request' && 'af20c510e81919ff417746824e44a73d2e8d6f8a' || github.event.client_payload.sha || github.event.inputs.sha }}
+          ref: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
+          sha: ${{ github.event.client_payload.sha || github.event.inputs.sha }}
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
 
       - name: Set pending statuses

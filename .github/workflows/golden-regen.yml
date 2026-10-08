@@ -1,0 +1,183 @@
+# Regenerate apps/shared_package golden PNGs for zysicyj-xxc/zysicyj.
+# Manual only. Does not post a commit status and does not push.
+# Trust boundary: the workflow_dispatch ref is untrusted until resolve-private-ref allowlists it.
+# Flutter 3.44.8 and the golden file list match visual-lint job
+# golden-tests (shared_package). A second flutter test without
+# --update-goldens is that gate's command on the files just written.
+# Public logs list golden test paths, exit codes, and changed PNG paths.
+# Flutter output is discarded so a secret or private file body cannot land in the log.
+# retention-days is 1 because any logged-in user can download a public-repo artifact.
+
+name: Golden Regen
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref or SHA of zysicyj-xxc/zysicyj'
+        required: false
+        default: main
+        type: string
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: golden-regen-${{ github.event.inputs.ref || 'main' }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  regen:
+    name: regen-goldens
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout public-builder
+        uses: actions/checkout@v4
+
+      - name: Allowlist ref
+        id: resolve
+        uses: ./.github/actions/resolve-private-ref
+        with:
+          ref: ${{ github.event.inputs.ref || 'main' }}
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ steps.resolve.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.8'
+          channel: 'stable'
+          cache: true
+
+      - name: Update goldens
+        id: update
+        run: |
+          set -euo pipefail
+          if [ ! -f apps/shared_package/pubspec.yaml ]; then
+            echo "ERROR: missing apps/shared_package/pubspec.yaml" >&2
+            exit 1
+          fi
+          pub_log="${RUNNER_TEMP}/flutter-pub-get.log"
+          update_log="${RUNNER_TEMP}/flutter-update-goldens.log"
+          verify_log="${RUNNER_TEMP}/flutter-verify.log"
+          pub_rc=0
+          test_rc=0
+          verify_rc=0
+          (
+            cd apps/shared_package
+            flutter pub get >"$pub_log" 2>&1
+          ) || pub_rc=$?
+          if [ "$pub_rc" -ne 0 ]; then
+            test_rc=1
+            verify_rc=1
+          else
+            cd apps/shared_package
+            mapfile -t files < <(grep -R -l -E 'matchesGoldenFile|testGoldens|goldenFileComparator' test --include='*_test.dart' || true)
+            if [ "${#files[@]}" -eq 0 ]; then
+              echo "ERROR: no golden tests under apps/shared_package/test" >&2
+              exit 1
+            fi
+            printf 'golden: %s\n' "${files[@]}"
+            flutter test --update-goldens "${files[@]}" >"$update_log" 2>&1 || test_rc=$?
+            if [ "$test_rc" -eq 0 ]; then
+              flutter test "${files[@]}" >"$verify_log" 2>&1 || verify_rc=$?
+            else
+              verify_rc=1
+            fi
+            cd "$GITHUB_WORKSPACE"
+          fi
+          echo "test_rc=${test_rc} verify_rc=${verify_rc}"
+
+          pack="${RUNNER_TEMP}/golden-pack"
+          rm -rf "$pack"
+          mkdir -p "$pack"
+          list="${pack}/changed-files.txt"
+          : >"$list"
+          while IFS= read -r -d '' rec; do
+            [ -n "$rec" ] || continue
+            xy="${rec:0:2}"
+            path="${rec:3}"
+            x="${xy:0:1}"
+            case "$x" in
+              R|C)
+                # -z rename/copy is "XY <new>\0<old>\0". Keep the new path.
+                IFS= read -r -d '' other || true
+                if [ ! -f "$path" ] && [ -n "${other:-}" ]; then
+                  path="$other"
+                fi
+                ;;
+            esac
+            case "$path" in
+              ''|/*|../*|*/../*|*/..) continue ;;
+              apps/shared_package/*) ;;
+              *) continue ;;
+            esac
+            y="${xy:1:1}"
+            keep=0
+            case "$x" in
+              M|A|'?'|R|C|T) keep=1 ;;
+            esac
+            case "$y" in
+              M|A|'?'|R|C|T) keep=1 ;;
+            esac
+            [ "$keep" -eq 1 ] || continue
+            [ -f "$path" ] || continue
+            low=$(printf '%s' "$path" | tr '[:upper:]' '[:lower:]')
+            case "$low" in
+              *.png) ;;
+              *) continue ;;
+            esac
+            case "$low" in
+              *golden*) ;;
+              *) continue ;;
+            esac
+            dest="${pack}/${path}"
+            mkdir -p "$(dirname "$dest")"
+            cp -- "$path" "$dest"
+            printf '%s\n' "$path" >>"$list"
+          done < <(git status --porcelain=v1 --untracked-files=all -z)
+
+          if [ "$test_rc" -eq 0 ] && [ "$verify_rc" -eq 0 ]; then
+            if [ -s "$list" ]; then
+              sort -u "$list" -o "${list}.sorted"
+              mv "${list}.sorted" "$list"
+              cat "$list"
+            else
+              echo "(none)"
+            fi
+          else
+            rm -rf "$pack"
+          fi
+          {
+            echo "pub_rc=${pub_rc}"
+            echo "test_rc=${test_rc}"
+            echo "verify_rc=${verify_rc}"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Upload golden pngs
+        if: steps.update.outputs.test_rc == '0' && steps.update.outputs.verify_rc == '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-package-goldens
+          path: ${{ runner.temp }}/golden-pack
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Fail when flutter did not succeed
+        if: steps.update.outputs.pub_rc != '0' || steps.update.outputs.test_rc != '0' || steps.update.outputs.verify_rc != '0'
+        run: |
+          echo "flutter command failed"
+          exit 1

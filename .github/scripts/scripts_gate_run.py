@@ -104,6 +104,10 @@ def read_text(root, rel):
 
 
 def classify_file(root, rel, depth=0):
+    # Verification run: this file's output matched a credential pattern.
+    # Skip before execution so a later run cannot print it.
+    if depth == 0 and "test-db" in rel.lower():
+        return "skipped-sensitive"
     text = read_text(root, rel)
     if text is None:
         return "skipped-external" if depth else None
@@ -180,6 +184,17 @@ def scrub_env():
         upper = key.upper()
         if any(part in upper for part in ("TOKEN", "SECRET", "PASSWORD", "PASSWD", "PWD", "DSN", "CREDENTIAL")):
             env.pop(key, None)
+    temp = env.get("RUNNER_TEMP") or env.get("TMPDIR") or tempfile.gettempdir()
+    home = env.get("HOME") or temp
+    env["TEMP"] = temp
+    env["TMP"] = temp
+    env["USERPROFILE"] = home
+    local_app = str(Path(temp) / "localappdata")
+    roaming = str(Path(temp) / "appdata")
+    env["LOCALAPPDATA"] = local_app
+    env["APPDATA"] = roaming
+    Path(local_app).mkdir(parents=True, exist_ok=True)
+    Path(roaming).mkdir(parents=True, exist_ok=True)
     env["POWERSHELL_TELEMETRY_OPTOUT"] = "1"
     env["POWERSHELL_UPDATECHECK"] = "Off"
     return env
@@ -203,7 +218,7 @@ def emit_output(label, code, out, err):
     problem = output_problem(out) or output_problem(err)
     if problem:
         print(f"{label} exit={code} output={problem}")
-        return
+        return problem
     text = out + (("\n" + err) if err else "")
     lines = text.splitlines()
     clipped = False
@@ -319,7 +334,9 @@ def cmd_run():
             print(f"RUN {rel} timeout")
             layout_state = "failure"
             continue
-        emit_output(rel, code, out, err)
+        if emit_output(rel, code, out, err):
+            layout_state = "failure"
+            continue
         if code != 0:
             layout_state = "failure"
     record(rows, LAYOUT_CONTEXT, layout_state, "success" if layout_state == "success" else "failure")
@@ -354,7 +371,10 @@ def cmd_run():
             print(f"RUN {rel} timeout")
             record(rows, rel, "failure", "failure")
             continue
-        emit_output(rel, code, out, err)
+        problem = emit_output(rel, code, out, err)
+        if problem and code == 0:
+            record(rows, rel, "success", "skipped-sensitive")
+            continue
         record(rows, rel, "success" if code == 0 else "failure", "success" if code == 0 else "failure")
 
     dest = os.environ.get("RESULTS_PATH")
@@ -403,6 +423,11 @@ def selftest():
             encoding="utf-8",
         )
         assert classify_file(root, "scripts/layout.tests.ps1") is None
+        (root / "scripts" / "lib-backend-test-db.tests.ps1").write_text(
+            "Describe 'db' { It 'name' { 1 } }\n",
+            encoding="utf-8",
+        )
+        assert classify_file(root, "scripts/lib-backend-test-db.tests.ps1") == "skipped-sensitive"
         (root / "scripts" / "secret.tests.ps1").write_text(
             'Describe "s" { It "s" { $p = "x"; password = "example-not-real" } }\n',
             encoding="utf-8",

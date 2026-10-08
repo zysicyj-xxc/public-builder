@@ -168,6 +168,16 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
+      - name: Checkout public workflows for script tests
+        uses: actions/checkout@v4
+        with:
+          path: repo/public-builder
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Python deps for Play usage tests
+        run: python -m pip install --user --break-system-packages google-auth google-api-python-client
+
       - name: Run layout, domain, and script tests
         working-directory: repo
         env:

@@ -3,12 +3,12 @@
 # Allowlist ref/sha before any API call. Status posts run in a separate job so
 # PRIVATE_REPO_ACCESS_TOKEN is not on the runner that executes private-repo code.
 #
-# The private script is one process (scripts/ci-verify-l10n-gates.ps1). Each
-# i18n-gate (<app>) context mirrors that single exit code.
-# It Push-Locations into each app and runs `flutter test --no-pub test/l10n`
-# without pub get. A fresh checkout has no package_config, so flutter test
-# reports a missing flutter_test dependency for every app. pub get first.
-# Flutter 3.44.8 is on PATH in case the script shells out to flutter.
+# One job per package posts its own i18n-gate (<app>) status. The job runs
+# `flutter pub get` then `flutter test --no-pub test/l10n` in that package.
+# A package with no test/l10n is skipped. This workflow does not call
+# scripts/ci-verify-l10n-gates.ps1 (local and pre-push still do).
+# Fresh checkouts have no package_config, so pub get runs before flutter test.
+# Flutter 3.44.8.
 
 name: i18n Gate
 
@@ -28,6 +28,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: i18n-gate-${{ github.event.client_payload.sha || github.event.inputs.sha || github.event.client_payload.ref || github.event.inputs.ref }}
@@ -121,10 +122,32 @@ jobs:
           done
 
   verify:
-    name: ci-verify-l10n-gates
+    name: i18n-gate (${{ matrix.app }})
     needs: meta
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - app: daymica
+            dir: apps/daymica
+          - app: mail-box
+            dir: apps/mail-box
+          - app: password-vault
+            dir: apps/password-vault
+          - app: yaoxiaobai
+            dir: apps/yaoxiaobai/yaoxiaobai_app
+          - app: eye-care
+            dir: apps/eye-care
+          - app: footprint
+            dir: apps/footprint
+          - app: water-tracker
+            dir: apps/water-tracker
+          - app: admin-app
+            dir: apps/admin-app
+          - app: shared_package
+            dir: apps/shared_package
     steps:
       - uses: actions/checkout@v4
         with:
@@ -133,36 +156,40 @@ jobs:
           ref: ${{ needs.meta.outputs.sha }}
           persist-credentials: false
           fetch-depth: 1
+
+      - name: Detect test/l10n
+        id: detect
+        env:
+          DIR: ${{ matrix.dir }}
+        run: |
+          set -euo pipefail
+          if [ -e "${DIR}/test/l10n" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: "skipped: no test/l10n"
+        if: steps.detect.outputs.present != 'true'
+        run: |
+          echo "skipped: no test/l10n"
+
       - uses: subosito/flutter-action@v2
+        if: steps.detect.outputs.present == 'true'
         with:
           flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
-      - name: pub get for l10n packages
+
+      - name: l10n gates
+        if: steps.detect.outputs.present == 'true'
+        env:
+          DIR: ${{ matrix.dir }}
         run: |
           set -euo pipefail
-          mapfile -t dirs < <(find apps \( -path '*/test/l10n' -o -path '*/test/l10n.dart' \) -printf '%h\n' | sed 's|/test$||' | sort -u)
-          if [ "${#dirs[@]}" -eq 0 ]; then
-            echo "ERROR: no test/l10n entrypoints" >&2
-            exit 1
-          fi
-          for dir in "${dirs[@]}"; do
-            if [ ! -f "${dir}/pubspec.yaml" ]; then
-              echo "ERROR: ${dir} has test/l10n but no pubspec.yaml" >&2
-              exit 1
-            fi
-            echo "== pub get ${dir} =="
-            (cd "${dir}" && flutter pub get)
-          done
-      - name: l10n gates
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if (-not (Test-Path -LiteralPath './scripts/ci-verify-l10n-gates.ps1')) {
-            throw 'missing scripts/ci-verify-l10n-gates.ps1'
-          }
-          & ./scripts/ci-verify-l10n-gates.ps1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cd "${DIR}"
+          flutter pub get
+          flutter test --no-pub test/l10n
 
   report:
     name: post-statuses
@@ -174,35 +201,76 @@ jobs:
       - name: Post conclusions
         env:
           SHA: ${{ needs.meta.outputs.sha }}
-          RESULT: ${{ needs.verify.result }}
-          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ACTIONS_TOKEN: ${{ github.token }}
+          STATUS_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
           if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
             echo "ERROR: sha failed allowlist" >&2
             exit 1
           fi
-          case "$RESULT" in
-            success) state=success; desc=success ;;
-            cancelled) state=failure; desc=cancelled ;;
-            *) state=failure; desc=failure ;;
-          esac
-          for ctx in \
-            "i18n-gate (daymica)" \
-            "i18n-gate (mail-box)" \
-            "i18n-gate (password-vault)" \
-            "i18n-gate (yaoxiaobai)" \
-            "i18n-gate (eye-care)" \
-            "i18n-gate (footprint)" \
-            "i18n-gate (water-tracker)" \
-            "i18n-gate (admin-app)" \
+          declare -A conc=()
+          declare -A detail=()
+          contexts=(
+            "i18n-gate (daymica)"
+            "i18n-gate (mail-box)"
+            "i18n-gate (password-vault)"
+            "i18n-gate (yaoxiaobai)"
+            "i18n-gate (eye-care)"
+            "i18n-gate (footprint)"
+            "i18n-gate (water-tracker)"
+            "i18n-gate (admin-app)"
             "i18n-gate (shared_package)"
-          do
-            echo "status ${ctx} ${state}"
-            gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
+          )
+          for attempt in 1 2 3 4 5 6; do
+            conc=()
+            detail=()
+            while IFS=$'\t' read -r name conclusion skipped; do
+              [ -n "$name" ] || continue
+              conc["$name"]=$conclusion
+              detail["$name"]=$skipped
+            done < <(GH_TOKEN="$ACTIONS_TOKEN" gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/jobs?per_page=100" \
+              --jq '.jobs[] | [.name, (.conclusion // ""), (if ((.steps // []) | any(.name == "skipped: no test/l10n" and .conclusion == "success")) then "skipped" else "" end)] | @tsv')
+            missing=0
+            for ctx in "${contexts[@]}"; do
+              if [ -z "${conc[$ctx]:-}" ]; then
+                missing=1
+                echo "waiting for ${ctx} (attempt ${attempt})"
+              fi
+            done
+            if [ "$missing" -eq 0 ]; then
+              break
+            fi
+            sleep 5
+          done
+          for name in "${!conc[@]}"; do
+            echo "job ${name} => ${conc[$name]}"
+          done
+          post() {
+            local ctx="$1" conclusion="${2:-}" skipped="${3:-}" state desc
+            case "$conclusion" in
+              success)
+                state=success
+                if [ "$skipped" = "skipped" ]; then
+                  desc="skipped: no test/l10n"
+                else
+                  desc=success
+                fi
+                ;;
+              cancelled) state=failure; desc=cancelled ;;
+              *) state=failure; desc=failure ;;
+            esac
+            echo "status ${ctx} ${state} ${desc}"
+            GH_TOKEN="$STATUS_TOKEN" gh api --method POST \
+              "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
               -f state="$state" \
               -f target_url="${RUN_URL}" \
               -f description="$desc" \
-              -f context="${ctx}" >/dev/null
+              -f context="$ctx" >/dev/null
+          }
+          for ctx in "${contexts[@]}"; do
+            post "$ctx" "${conc[$ctx]:-}" "${detail[$ctx]:-}"
           done

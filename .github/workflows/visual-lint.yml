@@ -77,13 +77,12 @@ jobs:
               -f context="$1" >/dev/null
           }
           post "visual-lint (mail-box)"
-          post "visual-lint (issue-board)"
           post "visual-lint (password-vault)"
           post "visual-lint (eye-care)"
           post "visual-lint (footprint)"
           post "visual-lint (yaoxiaobai)"
           post "visual-lint (daymica)"
-          post "visual-lint (token-board)"
+          post "visual-lint (water-tracker)"
           post "golden-tests (shared_package)"
 
       - name: Post failure when resolve fails
@@ -105,13 +104,12 @@ jobs:
           fi
           for ctx in \
             "visual-lint (mail-box)" \
-            "visual-lint (issue-board)" \
             "visual-lint (password-vault)" \
             "visual-lint (eye-care)" \
             "visual-lint (footprint)" \
             "visual-lint (yaoxiaobai)" \
             "visual-lint (daymica)" \
-            "visual-lint (token-board)" \
+            "visual-lint (water-tracker)" \
             "golden-tests (shared_package)"
           do
             gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${sha}" \
@@ -131,13 +129,12 @@ jobs:
       matrix:
         app:
           - mail-box
-          - issue-board
           - password-vault
           - eye-care
           - footprint
           - yaoxiaobai
           - daymica
-          - token-board
+          - water-tracker
     steps:
       - uses: actions/checkout@v4
         with:
@@ -158,13 +155,12 @@ jobs:
           set -euo pipefail
           case "$APP" in
             mail-box) dir=apps/mail-box ;;
-            issue-board) dir=apps/issue-board ;;
             password-vault) dir=apps/password-vault ;;
             eye-care) dir=apps/eye-care ;;
             footprint) dir=apps/footprint ;;
             yaoxiaobai) dir=apps/yaoxiaobai/yaoxiaobai_app ;;
             daymica) dir=apps/daymica ;;
-            token-board) dir=apps/token-board ;;
+            water-tracker) dir=apps/water-tracker ;;
             *) echo "ERROR: app not allowlisted" >&2; exit 1 ;;
           esac
           if [ ! -f "${dir}/pubspec.yaml" ]; then
@@ -241,13 +237,12 @@ jobs:
           declare -A conc=()
           contexts=(
             "visual-lint (mail-box)"
-            "visual-lint (issue-board)"
             "visual-lint (password-vault)"
             "visual-lint (eye-care)"
             "visual-lint (footprint)"
             "visual-lint (yaoxiaobai)"
             "visual-lint (daymica)"
-            "visual-lint (token-board)"
+            "visual-lint (water-tracker)"
             "golden-tests (shared_package)"
           )
           for attempt in 1 2 3 4 5 6; do

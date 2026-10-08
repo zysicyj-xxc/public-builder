@@ -278,48 +278,52 @@ jobs:
           set -euo pipefail
           python3 - << 'PY'
           import re, pathlib
-          root = pathlib.Path('.')
           def redact(line: str) -> str:
               line = re.sub(r'([A-Za-z0-9_.-]+):[^@\s\'"]+@', r'\1:***@', line)
-              line = re.sub(r'(?i)(password|passwd|pwd|token)\s*[:=]\s*\S+', r'\1=***', line)
+              line = re.sub(r'(?i)(password|passwd|pwd|secret)\s*[:=]\s*\S+', r'\1=***', line)
               line = re.sub(r'(?i)(ghp_|gho_|github_pat_)[A-Za-z0-9_]+', r'\1***', line)
-              line = re.sub(r'\b(?!127\.)(?:\d{1,3}\.){3}\d{1,3}\b', '[ip]', line)
-              return line[:240]
-          interesting = re.compile(r'TEST_DATABASE_DSN|CLEAN_TEST_DB|parseTime|multiStatements|charset|Migrate|goose|atlas|schema|CREATE DATABASE|mysqld|13306|3306|go test|docker compose|\.sql', re.I)
-          print('TREE')
-          for p in sorted(root.rglob('*')):
-              if not p.is_file():
+              return line.rstrip()
+          files = [
+              pathlib.Path('scripts/run-backend-test-db.ps1'),
+              pathlib.Path('backend/docker-compose.test.yml'),
+          ]
+          for p in files:
+              print(f'===== {p} exists={p.exists()} =====')
+              if not p.exists():
                   continue
-              rel = p.as_posix()
-              if any(x in rel for x in ('.git/', 'node_modules/', 'vendor/', '.dart_tool/')):
-                  continue
-              name = p.name.lower()
-              if 'migrat' in rel.lower() or 'schema' in name or name in ('run-backend-test-db.ps1', 'run-backend-tests-local.ps1', 'docker-compose.test.yml'):
-                  print(rel)
-          print('HITS')
-          for p in sorted(root.rglob('*')):
-              if not p.is_file() or p.suffix.lower() not in {'.ps1', '.go', '.yml', '.yaml', '.sh', '.sql'}:
-                  continue
-              rel = p.as_posix()
-              if any(x in rel for x in ('.git/', 'node_modules/', 'vendor/', '.dart_tool/')):
-                  continue
-              keep = (
-                  p.name in ('run-backend-test-db.ps1', 'run-backend-tests-local.ps1', 'docker-compose.test.yml')
-                  or '/testutil/' in rel
-                  or p.name == 'db.go'
-              )
-              if not keep:
-                  continue
-              lines = p.read_text(encoding='utf-8', errors='replace').splitlines()
-              shown = 0
-              print(f'FILE {rel}')
+              for i, line in enumerate(p.read_text(encoding='utf-8', errors='replace').splitlines(), 1):
+                  print(f'{i}:{redact(line)}')
+          db = pathlib.Path('backend/internal/testutil/db.go')
+          print(f'===== {db} autoMigrateAll =====')
+          if db.exists():
+              lines = db.read_text(encoding='utf-8', errors='replace').splitlines()
+              capturing = False
               for i, line in enumerate(lines, 1):
-                  if interesting.search(line):
+                  if line.startswith('func autoMigrateAll') or line.startswith('func clean') or '清空' in line or '重建' in line:
+                      capturing = True
+                  if capturing:
                       print(f'{i}:{redact(line)}')
-                      shown += 1
-                      if shown >= 80:
-                          print('...truncated')
+                      if line.startswith('func ') and not (line.startswith('func autoMigrateAll') or line.startswith('func clean')):
                           break
+                      if i > 0 and capturing and line == '}' and lines[i-1:i] and sum(1 for x in lines[max(0,i-40):i] if x.startswith('func autoMigrateAll') or x.startswith('func clean')):
+                          # stop at the closing brace of the captured func if the next non-empty is another func; handled below
+                          pass
+              # print the captured function only, ended by a column-0 closing brace
+              print('----- slice -----')
+              start = next((i for i,l in enumerate(lines) if l.startswith('func autoMigrateAll')), None)
+              if start is not None:
+                  for i in range(start, len(lines)):
+                      print(f'{i+1}:{redact(lines[i])}')
+                      if i > start and lines[i] == '}':
+                          break
+          print('===== CREATE TABLE names =====')
+          for p in sorted(pathlib.Path('backend').rglob('*.sql')):
+              rel = p.as_posix()
+              if '/vendor/' in rel:
+                  continue
+              for i, line in enumerate(p.read_text(encoding='utf-8', errors='replace').splitlines(), 1):
+                  if re.search(r'CREATE TABLE', line, re.I):
+                      print(f'{rel}:{i}:{redact(line)[:180]}')
           PY
       - name: go build + test
         working-directory: backend

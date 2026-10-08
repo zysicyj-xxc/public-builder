@@ -10,9 +10,6 @@ name: Quality Analyze
 on:
   repository_dispatch:
     types: [quality-analyze]
-  # ponytail: branch push is only so this PR can be verified without actions:write. Remove before merge.
-  push:
-    branches: [fix/qa-mysql-0be5]
   workflow_dispatch:
     inputs:
       ref:
@@ -175,12 +172,6 @@ jobs:
 
           if [ -z "${GH_TOKEN:-}" ]; then
             fail "PRIVATE_REPO_ACCESS_TOKEN is empty"
-          fi
-
-          # ponytail: verification-only. Push has no client_payload; drop with the push trigger.
-          if [ "${GITHUB_EVENT_NAME:-}" = "push" ]; then
-            RAW_REF=3d26b5c54509eeeb28e081c9d97cf1ba592b3703
-            RAW_SCOPES=backend
           fi
 
           REF_NORM=$(normalize_ref "${RAW_REF:-}")

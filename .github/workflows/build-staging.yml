@@ -255,27 +255,29 @@ jobs:
           $apks = @(Get-ChildItem -Path (Join-Path 'apps' $app) -Recurse -Filter *.apk -File |
             Where-Object { $_.FullName -match 'outputs[/\\]flutter-apk[/\\]' -and $_.Name -notmatch 'unaligned|unsigned' })
           $found = @()
+          $seen = @()
           foreach ($apk in $apks) {
             $badging = @(& $aapt dump badging $apk.FullName)
             if ($LASTEXITCODE -ne 0) { throw 'aapt dump badging failed' }
-            $line = @($badging | Where-Object { $_ -like 'package:*' } | Select-Object -First 1)
-            if (-not $line) { continue }
+            $line = [string]($badging | Where-Object { $_ -like 'package:*' } | Select-Object -First 1)
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
             if ($line -notmatch "name='([^']+)'") { continue }
             $pkg = $Matches[1]
-            if (-not $pkg.EndsWith('.staging')) { continue }
+            $seen += "$($apk.Name)=$pkg"
+            if (-not $pkg -or -not $pkg.EndsWith('.staging')) { continue }
             $ver = ''
             $code = ''
             if ($line -match "versionName='([^']*)'") { $ver = $Matches[1] }
             if ($line -match "versionCode='([^']*)'") { $code = $Matches[1] }
             $found += [pscustomobject]@{ Apk = $apk; Package = $pkg; Version = $ver; Code = $code }
           }
-          if ($found.Count -ne 1) { throw "expected one .staging apk, found $($found.Count)" }
+          if ($found.Count -ne 1) { throw "expected one .staging apk, found $($found.Count); saw $($seen -join ', ')" }
           $chosen = $found[0]
 
           $certLines = @(& $apksigner verify --print-certs $chosen.Apk.FullName)
           if ($LASTEXITCODE -ne 0) { throw 'apksigner verify failed' }
-          $dnLine = @($certLines | Where-Object { $_ -match 'certificate DN:' } | Select-Object -First 1)
-          $fpLine = @($certLines | Where-Object { $_ -match 'certificate SHA-256 digest:' } | Select-Object -First 1)
+          $dnLine = [string]($certLines | Where-Object { $_ -match 'certificate DN:' } | Select-Object -First 1)
+          $fpLine = [string]($certLines | Where-Object { $_ -match 'certificate SHA-256 digest:' } | Select-Object -First 1)
           if ($dnLine -notmatch 'certificate DN:\s*(.+)$') { throw 'certificate DN missing' }
           $subject = $Matches[1].Trim()
           $debug = $subject -match '(?i)(^|,\s*)CN\s*=\s*Android Debug\s*(,|$)'
@@ -444,7 +446,7 @@ jobs:
           $pub = Join-Path "apps/$app" 'pubspec.yaml'
           $versionLine = @(Select-String -LiteralPath $pub -Pattern '^version:\s*\S+' | Select-Object -First 1)
           if (-not $versionLine) { throw 'pubspec version missing' }
-          $version = ($versionLine.Line -replace '^version:\s*', '').Trim()
+          $version = ($versionLine.Line -replace '^version:\s*', '').Trim().Trim('"').Trim("'")
           $all = @(Get-ChildItem -Path "apps/$app" -Recurse -File -Include *.exe, *.zip -ErrorAction SilentlyContinue |
             Where-Object {
               $_.Length -gt 500KB -and

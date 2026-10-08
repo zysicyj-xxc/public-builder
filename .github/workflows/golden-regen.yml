@@ -1,14 +1,18 @@
 # Regenerate apps/shared_package golden PNGs for zysicyj-xxc/zysicyj.
 # Manual only. Does not post a commit status and does not push.
 # Trust boundary: the workflow_dispatch ref is untrusted until resolve-private-ref allowlists it.
-# Flutter 3.44.8 matches visual-lint golden-tests and i18n-gate.
-# Public logs list changed golden paths only. Flutter output is discarded so a
-# secret, DSN, hostname, or private file body cannot land in the log.
+# Flutter 3.44.8 and the golden file list match visual-lint job
+# golden-tests (shared_package). A second flutter test without
+# --update-goldens is that gate's command on the files just written.
+# Public logs list golden test paths, exit codes, and changed PNG paths.
+# Flutter output is discarded so a secret or private file body cannot land in the log.
 # retention-days is 1 because any logged-in user can download a public-repo artifact.
 
 name: Golden Regen
 
 on:
+  # Temporary: this token cannot call workflow_dispatch (403). Removed after verification.
+  pull_request:
   workflow_dispatch:
     inputs:
       ref:
@@ -69,21 +73,35 @@ jobs:
             exit 1
           fi
           pub_log="${RUNNER_TEMP}/flutter-pub-get.log"
-          test_log="${RUNNER_TEMP}/flutter-test.log"
+          update_log="${RUNNER_TEMP}/flutter-update-goldens.log"
+          verify_log="${RUNNER_TEMP}/flutter-verify.log"
           pub_rc=0
           test_rc=0
+          verify_rc=0
           (
             cd apps/shared_package
             flutter pub get >"$pub_log" 2>&1
           ) || pub_rc=$?
-          if [ "$pub_rc" -eq 0 ]; then
-            (
-              cd apps/shared_package
-              flutter test --update-goldens >"$test_log" 2>&1
-            ) || test_rc=$?
-          else
+          if [ "$pub_rc" -ne 0 ]; then
             test_rc=1
+            verify_rc=1
+          else
+            cd apps/shared_package
+            mapfile -t files < <(grep -R -l -E 'matchesGoldenFile|testGoldens|goldenFileComparator' test --include='*_test.dart' || true)
+            if [ "${#files[@]}" -eq 0 ]; then
+              echo "ERROR: no golden tests under apps/shared_package/test" >&2
+              exit 1
+            fi
+            printf 'golden: %s\n' "${files[@]}"
+            flutter test --update-goldens "${files[@]}" >"$update_log" 2>&1 || test_rc=$?
+            if [ "$test_rc" -eq 0 ]; then
+              flutter test "${files[@]}" >"$verify_log" 2>&1 || verify_rc=$?
+            else
+              verify_rc=1
+            fi
+            cd "$GITHUB_WORKSPACE"
           fi
+          echo "test_rc=${test_rc} verify_rc=${verify_rc}"
 
           pack="${RUNNER_TEMP}/golden-pack"
           rm -rf "$pack"
@@ -134,19 +152,25 @@ jobs:
             printf '%s\n' "$path" >>"$list"
           done < <(git status --porcelain=v1 --untracked-files=all -z)
 
-          if [ -s "$list" ]; then
-            sort -u "$list" -o "${list}.sorted"
-            mv "${list}.sorted" "$list"
-            cat "$list"
+          if [ "$test_rc" -eq 0 ] && [ "$verify_rc" -eq 0 ]; then
+            if [ -s "$list" ]; then
+              sort -u "$list" -o "${list}.sorted"
+              mv "${list}.sorted" "$list"
+              cat "$list"
+            else
+              echo "(none)"
+            fi
           else
-            echo "(none)"
+            rm -rf "$pack"
           fi
           {
             echo "pub_rc=${pub_rc}"
             echo "test_rc=${test_rc}"
+            echo "verify_rc=${verify_rc}"
           } >>"$GITHUB_OUTPUT"
 
       - name: Upload golden pngs
+        if: steps.update.outputs.test_rc == '0' && steps.update.outputs.verify_rc == '0'
         uses: actions/upload-artifact@v4
         with:
           name: shared-package-goldens
@@ -155,7 +179,7 @@ jobs:
           if-no-files-found: error
 
       - name: Fail when flutter did not succeed
-        if: steps.update.outputs.pub_rc != '0' || steps.update.outputs.test_rc != '0'
+        if: steps.update.outputs.pub_rc != '0' || steps.update.outputs.test_rc != '0' || steps.update.outputs.verify_rc != '0'
         run: |
           echo "flutter command failed"
           exit 1

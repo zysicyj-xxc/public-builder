@@ -12,7 +12,6 @@
 name: Staging Builds
 
 on:
-  pull_request:
   workflow_dispatch:
     inputs:
       app:
@@ -117,9 +116,6 @@ jobs:
           set -euo pipefail
           app="${RAW_APP:-}"
           case "$GITHUB_EVENT_NAME" in
-            pull_request)
-              echo "apps=,daymica,password-vault," >> "$GITHUB_OUTPUT"
-              ;;
             workflow_dispatch|repository_dispatch)
               case "$app" in
                 daymica|password-vault) ;;
@@ -137,8 +133,8 @@ jobs:
         id: resolve
         uses: ./.github/actions/resolve-private-ref
         with:
-          ref: ${{ github.event_name == 'pull_request' && 'main' || github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
-          sha: ${{ github.event_name != 'pull_request' && (github.event.inputs.sha || github.event.client_payload.sha) || '' }}
+          ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+          sha: ${{ github.event.inputs.sha || github.event.client_payload.sha }}
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
 
   android:

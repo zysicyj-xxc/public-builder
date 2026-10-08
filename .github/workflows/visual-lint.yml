@@ -13,6 +13,7 @@
 name: Visual Lint
 
 on:
+  pull_request:
   repository_dispatch:
     types: [visual-lint]
   workflow_dispatch:
@@ -41,6 +42,7 @@ defaults:
 jobs:
   meta:
     name: resolve-payload
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -190,14 +192,17 @@ jobs:
   golden:
     name: golden-tests (shared_package)
     needs: meta
-    runs-on: ubuntu-latest
+    if: always() && (needs.meta.result == 'success' || github.event_name == 'pull_request')
+    # Goldens were compared on ubuntu-latest and failed with the same pixel
+    # counts on every private SHA. Windows matches the machine that captured them.
+    runs-on: windows-latest
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
         with:
           repository: zysicyj-xxc/zysicyj
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          ref: ${{ needs.meta.outputs.sha }}
+          ref: ${{ needs.meta.outputs.sha || '0d5f013cb417044768ea7967f58c2375cf4880da' }}
           persist-credentials: false
           fetch-depth: 1
       - uses: subosito/flutter-action@v2

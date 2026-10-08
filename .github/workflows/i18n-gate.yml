@@ -62,6 +62,15 @@ jobs:
           foreach ($f in $flags) {
             Write-Host ("flag {0}={1}" -f $f, $text.Contains($f))
           }
+          $n = 0
+          foreach ($line in ($text -split "`n")) {
+            if ($line -notmatch 'flutter|Push-Location|Pop-Location|pub get|no-pub') { continue }
+            $redacted = [regex]::Replace($line.Trim(), "'[^']*'|`"[^`"]*`"", "''")
+            if ($redacted.Length -gt 180) { $redacted = $redacted.Substring(0, 180) }
+            Write-Host ("line {0}" -f $redacted)
+            $n++
+            if ($n -ge 40) { break }
+          }
           Write-Host ("root_pubspec={0}" -f (Test-Path -LiteralPath './pubspec.yaml'))
           Write-Host ("root_package_config={0}" -f (Test-Path -LiteralPath './.dart_tool/package_config.json'))
           if (Test-Path -LiteralPath './pubspec.yaml') {

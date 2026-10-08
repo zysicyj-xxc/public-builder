@@ -273,33 +273,31 @@ jobs:
         with:
           go-version: '1.26.6'
           cache-dependency-path: backend/go.sum
-      - name: Show DSN helper and gap SQL
+      - name: Create tables AutoMigrate skips
+        env:
+          MYSQL_PWD: test
         run: |
           set -euo pipefail
-          python3 - << 'PY'
-          import pathlib, re
-          def redact(line: str) -> str:
-              line = re.sub(r'([A-Za-z0-9_.-]+):[^@\s\'"]+@', r'\1:***@', line)
-              line = re.sub(r'(?i)(password|passwd|pwd)\s*[:=]\s*\S+', r'\1=***', line)
-              return line.rstrip()
-          paths = [
-              'scripts/lib/lib-backend-test-db.ps1',
-              'backend/sql/security_settings.sql',
-              'backend/sql/user_totp_trusted_devices.sql',
-              'backend/sql/user_app_memberships.sql',
-          ]
-          for rel in paths:
-              p = pathlib.Path(rel)
-              print(f'===== {rel} exists={p.exists()} =====')
-              if not p.exists():
-                  continue
-              for i, line in enumerate(p.read_text(encoding='utf-8', errors='replace').splitlines(), 1):
-                  print(f'{i}:{redact(line)}')
-          PY
+          # testutil AutoMigrate omits these. The ps1 only starts MySQL; a fresh
+          # database needs the CREATE TABLE IF NOT EXISTS scripts.
+          cid=$(docker ps -q --filter ancestor=mysql:8.0 | head -n 1)
+          if [ -z "$cid" ]; then
+            echo "ERROR: mysql service container not found" >&2
+            docker ps --format '{{.Image}}' >&2
+            exit 1
+          fi
+          for f in \
+            backend/sql/security_settings.sql \
+            backend/sql/user_totp_trusted_devices.sql \
+            backend/sql/user_app_memberships.sql
+          do
+            echo "apply ${f}"
+            docker exec -i -e MYSQL_PWD "$cid" mysql --protocol=TCP -uroot zysicyj_test < "$f"
+          done
       - name: go build + test
         working-directory: backend
         env:
-          # go-sql-driver DSN. Image creates zysicyj_test; tests migrate on connect.
+          # Same query string as scripts/lib/lib-backend-test-db.ps1 local DSN. Port is the mapped 3306.
           TEST_DATABASE_DSN: "root:test@tcp(127.0.0.1:3306)/zysicyj_test?charset=utf8mb4&parseTime=True&loc=Local"
           CLEAN_TEST_DB: "true"
         run: |

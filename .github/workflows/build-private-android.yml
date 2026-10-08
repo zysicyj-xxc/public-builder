@@ -275,13 +275,14 @@ jobs:
       - name: upload AAB artifact
         # 政策声明（照片/视频权限核心功能）未提交时 edits.commit 会 403，AAB 构建本身是好的。
         # 这里必须 always：把 AAB 留成产物，才能在 Play Console 手工建草稿把声明表单项逼出来。
+        # 手动上传请在 3 天内下载。
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: daymica-play-aab-${{ needs.validate.outputs.daymica_version }}-${{ needs.validate.outputs.daymica_build }}
           path: apps/daymica/build/app/outputs/bundle/playRelease/app-play-release.aab
           if-no-files-found: ignore
-          retention-days: 1
+          retention-days: 3
 
   yaoxiaobai-android:
     name: yaoxiaobai-android-arm64
@@ -579,13 +580,14 @@ jobs:
       - name: upload AAB artifact
         # 政策声明未提交时 edits.commit 403，AAB 构建本身是好的。
         # 必须 always：把 AAB 留成产物，才能在 Play Console 手工建草稿把声明表单项逼出来。
+        # 手动上传请在 3 天内下载。
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: passwordvault-play-aab-${{ needs.validate.outputs.newapp_version }}-${{ needs.validate.outputs.newapp_build }}
           path: apps/password-vault/build/app/outputs/bundle/release/app-release.aab
           if-no-files-found: ignore
-          retention-days: 1
+          retention-days: 3
 
   mailbox-android:
     name: mailbox-android-arm64
@@ -777,13 +779,14 @@ jobs:
       - name: upload AAB artifact
         # 政策声明未提交时 edits.commit 403，AAB 构建本身是好的。
         # 必须 always：把 AAB 留成产物，才能在 Play Console 手工建草稿把声明表单项逼出来。
+        # 手动上传请在 3 天内下载。
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: yaoxiaobai-play-aab-${{ needs.validate.outputs.yaoxiaobai_version }}-${{ needs.validate.outputs.yaoxiaobai_build }}
           path: apps/yaoxiaobai/yaoxiaobai_app/build/app/outputs/bundle/release/app-release.aab
           if-no-files-found: ignore
-          retention-days: 1
+          retention-days: 3
 
   footprint-play:
     name: footprint-play-aab
@@ -855,13 +858,14 @@ jobs:
       - name: upload AAB artifact
         # 政策声明未提交时 edits.commit 403，AAB 构建本身是好的。
         # 必须 always：把 AAB 留成产物，才能在 Play Console 手工建草稿把声明表单项逼出来。
+        # 手动上传请在 3 天内下载。
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: footprint-play-aab-${{ needs.validate.outputs.footprint_version }}-${{ needs.validate.outputs.footprint_build }}
           path: apps/footprint/build/app/outputs/bundle/release/app-release.aab
           if-no-files-found: ignore
-          retention-days: 1
+          retention-days: 3
 
   mailbox-play:
     name: mailbox-play-aab
@@ -933,13 +937,14 @@ jobs:
       - name: upload AAB artifact
         # 政策声明未提交时 edits.commit 403，AAB 构建本身是好的。
         # 必须 always：把 AAB 留成产物，才能在 Play Console 手工建草稿把声明表单项逼出来。
+        # 手动上传请在 3 天内下载。
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: mailbox-play-aab-${{ needs.validate.outputs.newapp_version }}-${{ needs.validate.outputs.newapp_build }}
           path: apps/mail-box/build/app/outputs/bundle/release/app-release.aab
           if-no-files-found: ignore
-          retention-days: 1
+          retention-days: 3
 
   adminapp-play:
     name: adminapp-play-aab
@@ -1011,13 +1016,14 @@ jobs:
       - name: upload AAB artifact
         # 政策声明未提交时 edits.commit 403，AAB 构建本身是好的。
         # 必须 always：把 AAB 留成产物，才能在 Play Console 手工建草稿把声明表单项逼出来。
+        # 手动上传请在 3 天内下载。
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: adminapp-play-aab-${{ needs.validate.outputs.newapp_version }}-${{ needs.validate.outputs.newapp_build }}
           path: apps/admin-app/build/app/outputs/bundle/release/app-release.aab
           if-no-files-found: ignore
-          retention-days: 1
+          retention-days: 3
 
   watertracker-android:
     name: watertracker-android-arm64
@@ -1147,13 +1153,14 @@ jobs:
       - name: upload AAB artifact
         # 政策声明未提交时 edits.commit 403，AAB 构建本身是好的。
         # 必须 always：把 AAB 留成产物，才能在 Play Console 手工建草稿把声明表单项逼出来。
+        # 手动上传请在 3 天内下载。
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: watertracker-play-aab-${{ needs.validate.outputs.newapp_version }}-${{ needs.validate.outputs.newapp_build }}
           path: apps/water-tracker/build/app/outputs/bundle/release/app-release.aab
           if-no-files-found: ignore
-          retention-days: 1
+          retention-days: 3
 
   release:
     name: create-github-release

@@ -1,0 +1,204 @@
+# Full flutter test for apps/mail-box on zysicyj-xxc/zysicyj.
+# Reuses the private visual-lint dispatcher (event_type visual-lint). That
+# dispatcher already fires for apps/mail-box and apps/shared_package changes,
+# including tests, arb, and golden files. i18n-gate does not: golden-only
+# shared_package updates do not dispatch it.
+# This workflow does not run the test unless the private diff touches
+# apps/mail-box/** or apps/shared_package/**. Other dispatches write no status.
+#
+# Trust boundary: repository_dispatch client_payload and workflow_dispatch
+# inputs are untrusted. Allowlist ref/sha before any API call. Status posts
+# run in separate jobs so PRIVATE_REPO_ACCESS_TOKEN is not on the runner
+# that executes private-repo code. Logs list match flags only, not paths,
+# file bodies, or tokens.
+
+name: Flutter Test
+
+on:
+  repository_dispatch:
+    types: [visual-lint]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref or SHA of zysicyj-xxc/zysicyj'
+        required: true
+        type: string
+      sha:
+        description: 'Commit SHA for checkout and status (default: resolve ref)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flutter-test-${{ github.event.client_payload.sha || github.event.inputs.sha || github.event.client_payload.ref || github.event.inputs.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  meta:
+    name: resolve-payload
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      run: ${{ steps.paths.outputs.run }}
+    steps:
+      - name: Checkout public-builder
+        uses: actions/checkout@v4
+
+      - name: Self-check path matcher
+        run: bash .github/scripts/flutter_test_paths.sh --selftest
+
+      - name: Allowlist ref/sha
+        id: resolve
+        uses: ./.github/actions/resolve-private-ref
+        with:
+          ref: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
+          sha: ${{ github.event.client_payload.sha || github.event.inputs.sha }}
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+
+      - name: Decide from private diff
+        id: paths
+        env:
+          REF: ${{ steps.resolve.outputs.ref }}
+          SHA: ${{ steps.resolve.outputs.sha }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "ERROR: sha failed allowlist" >&2
+            exit 1
+          fi
+          tmp=$(mktemp)
+          trap 'rm -f "$tmp"' EXIT
+          if printf '%s' "$REF" | grep -Eq '^refs/pull/[0-9]+/(head|merge)$'; then
+            n=$(printf '%s' "$REF" | sed -E 's#^refs/pull/([0-9]+)/(head|merge)$#\1#')
+            gh api --paginate "repos/zysicyj-xxc/zysicyj/pulls/${n}/files?per_page=100" \
+              --jq '.[] | .filename, (.previous_filename // empty)' > "$tmp"
+          else
+            n=$(gh api "repos/zysicyj-xxc/zysicyj/commits/${SHA}/pulls" \
+              --jq '.[] | [.number, .head.sha] | @tsv' \
+              | awk -F '\t' -v sha="$SHA" '$2==sha {print $1; exit}')
+            if printf '%s' "$n" | grep -Eq '^[0-9]+$'; then
+              gh api --paginate "repos/zysicyj-xxc/zysicyj/pulls/${n}/files?per_page=100" \
+                --jq '.[] | .filename, (.previous_filename // empty)' > "$tmp"
+            else
+              gh api "repos/zysicyj-xxc/zysicyj/commits/${SHA}" \
+                --jq '.files[]? | .filename, (.previous_filename // empty)' > "$tmp"
+            fi
+          fi
+          result=$(bash .github/scripts/flutter_test_paths.sh < "$tmp")
+          printf '%s\n' "$result"
+          run=$(printf '%s\n' "$result" | awk -F= '$1=="run"{print $2}')
+          if [ "$run" != "true" ] && [ "$run" != "false" ]; then
+            echo "ERROR: path matcher returned no decision" >&2
+            exit 1
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          if [ "$run" = "true" ]; then
+            echo "flutter-test: paths match"
+          else
+            echo "flutter-test: skip"
+          fi
+
+      - name: Set pending status
+        if: steps.paths.outputs.run == 'true'
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "ERROR: sha failed allowlist" >&2
+            exit 1
+          fi
+          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
+            -f state="pending" \
+            -f target_url="${RUN_URL}" \
+            -f description="running on public-builder" \
+            -f context="flutter-test (mail-box)" >/dev/null
+
+  test:
+    name: flutter-test (mail-box)
+    needs: meta
+    if: needs.meta.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.meta.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ steps.flutter.outputs.version }}
+          channel: stable
+          cache: true
+
+      - name: flutter pub get and test
+        working-directory: apps/mail-box
+        run: |
+          set -euo pipefail
+          if [ ! -f pubspec.yaml ]; then
+            echo "ERROR: missing apps/mail-box/pubspec.yaml" >&2
+            exit 1
+          fi
+          flutter pub get
+          flutter test
+
+  report:
+    name: post-status
+    needs: [meta, test]
+    if: always() && needs.meta.result == 'success' && needs.meta.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Post conclusion
+        env:
+          SHA: ${{ needs.meta.outputs.sha }}
+          RESULT: ${{ needs.test.result }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "ERROR: sha failed allowlist" >&2
+            exit 1
+          fi
+          case "$RESULT" in
+            success) state=success; desc=success ;;
+            cancelled) state=failure; desc=cancelled ;;
+            *) state=failure; desc=failure ;;
+          esac
+          echo "status flutter-test (mail-box) ${state}"
+          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
+            -f state="$state" \
+            -f target_url="${RUN_URL}" \
+            -f description="$desc" \
+            -f context="flutter-test (mail-box)" >/dev/null

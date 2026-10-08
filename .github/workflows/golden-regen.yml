@@ -143,12 +143,49 @@ jobs:
           else
             echo "(none)"
           fi
-          # Temporary: counts only. Removed with the pull_request trigger.
+          # Temporary: keyword counts only. Removed with the pull_request trigger.
           echo "pub_rc=${pub_rc} test_rc=${test_rc}"
           if [ -f "$test_log" ]; then
-            grep -E '^[0-9]+:[0-9]+ \+[0-9]+( -[0-9]+)?: (All tests passed!|Some tests failed\.)$' "$test_log" | tail -n 1 || true
-            marks=$(grep -c '\[E\]' "$test_log" || true)
-            echo "error_marks=${marks:-0}"
+            python3 - "$test_log" <<'PY'
+import re, sys
+raw = open(sys.argv[1], errors="replace").read()
+raw = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", raw)
+lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+print(f"log_lines={len(lines)}")
+keys = (
+    "Some tests failed",
+    "All tests passed",
+    "[E]",
+    "Error",
+    "Exception",
+    "Failed to",
+    "No tests",
+    "compilation",
+    "Golden",
+    "Unable",
+    "exited",
+    "font",
+)
+low_lines = [ln.lower() for ln in lines]
+for key in keys:
+    n = sum(key.lower() in ln for ln in low_lines)
+    label = re.sub(r"[^A-Za-z0-9]+", "_", key).strip("_")
+    print(f"count_{label}={n}")
+last = lines[-1] if lines else ""
+safe = re.fullmatch(r"[0-9:+ \-A-Za-z.!]+", last) and "/" not in last and "@" not in last and len(last) < 120
+if safe:
+    print("tail=" + last)
+else:
+    print(
+        "tail_len=%d tail_has_failed=%d tail_has_error=%d tail_has_slash=%d"
+        % (
+            len(last),
+            int("failed" in last.lower()),
+            int("error" in last.lower()),
+            int("/" in last),
+        )
+    )
+PY
           fi
           {
             echo "pub_rc=${pub_rc}"

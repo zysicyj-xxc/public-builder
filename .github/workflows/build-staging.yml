@@ -5,7 +5,7 @@
 # Signing secrets are STAGING_ANDROID_* only. Missing staging keystore falls
 # back to the Android debug certificate inside the private staging script.
 # 测试包只作为 GitHub Actions artifact 上传，保留 1 天。公开仓库里这些 artifact 公开 1 天。
-# 不上传对象存储，不读生产签名凭据。上传前用同一脚本数生产 API 主机名，出现过就不上传。
+# 不上传对象存储，不读生产签名凭据。publish=true（仅 daymica）时另传到测试后端 test-api 并注册测试 version。上传前用同一脚本数生产 API 主机名，出现过就不上传。
 # This workflow does not create tags, GitHub Releases, or CNB builds.
 # repository_dispatch type is staging-build (not the production trigger-build).
 
@@ -30,6 +30,11 @@ on:
         description: 'Commit SHA (optional; wins over ref)'
         required: false
         type: string
+      publish:
+        description: 'daymica only: upload APK to the staging backend and register a staging version'
+        required: false
+        default: false
+        type: boolean
   repository_dispatch:
     types: [staging-build]
 
@@ -53,6 +58,7 @@ jobs:
       sha: ${{ steps.resolve.outputs.sha }}
       ref: ${{ steps.resolve.outputs.ref }}
       apps: ${{ steps.norm.outputs.apps }}
+      publish: ${{ steps.norm.outputs.publish }}
     steps:
       - name: Checkout public-builder
         uses: actions/checkout@v4
@@ -94,6 +100,7 @@ jobs:
               "STAGING_ANDROID_KEYSTORE_PASSWORD",
               "STAGING_ANDROID_KEY_ALIAS",
               "STAGING_ANDROID_KEY_PASSWORD",
+              "STAGING_DAYMICA_RELEASE_TOKEN",
           }
           bad = []
           for match in re.finditer(r"secrets\.([A-Z0-9_]+)", text):
@@ -112,6 +119,7 @@ jobs:
         shell: bash
         env:
           RAW_APP: ${{ github.event.inputs.app || github.event.client_payload.app }}
+          RAW_PUBLISH: ${{ github.event.inputs.publish || github.event.client_payload.publish }}
         run: |
           set -euo pipefail
           app="${RAW_APP:-}"
@@ -122,6 +130,9 @@ jobs:
                 *) echo "app failed allowlist" >&2; exit 1 ;;
               esac
               echo "apps=,$app," >> "$GITHUB_OUTPUT"
+              publish=false
+              if [ "${RAW_PUBLISH:-}" = "true" ] && [ "$app" = "daymica" ]; then publish=true; fi
+              echo "publish=$publish" >> "$GITHUB_OUTPUT"
               ;;
             *)
               echo "event failed allowlist" >&2
@@ -210,7 +221,10 @@ jobs:
           $env:TMPDIR = $env:RUNNER_TEMP
           $env:TEMP = $env:RUNNER_TEMP
           $env:TMP = $env:RUNNER_TEMP
-          & ./scripts/build-flutter-android-staging.ps1 -AppSlug $env:APP_SLUG
+          # Unique, increasing versionCode so installed staging builds see an update.
+          $buildNumber = [string][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+          Write-Host "build_number=$buildNumber"
+          & ./scripts/build-flutter-android-staging.ps1 -AppSlug $env:APP_SLUG -BuildNumber $buildNumber
           if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Check package name and certificate
@@ -308,6 +322,8 @@ jobs:
           @(
             "artifact_name=$artifact"
             "package_path=$pkgPath"
+            "version=$safeVer"
+            "version_code=$($chosen.Code)"
           ) | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8NoBOM
           Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "app=$app platform=android version=$($chosen.Version) artifact=$artifact" -Encoding utf8NoBOM
 
@@ -355,6 +371,66 @@ jobs:
           path: ${{ steps.record.outputs.package_path }}
           retention-days: 1
           if-no-files-found: error
+
+      # Staging-only publish: upload to the staging backend and register a staging version.
+      # Host is hard-coded to the staging API; the token is the staging release token only.
+      # Logs print status codes and the staging path only, never the token or response bodies.
+      - name: Publish to staging backend
+        if: success() && matrix.app == 'daymica' && needs.guard.outputs.publish == 'true'
+        shell: bash
+        env:
+          RELEASE_TOKEN: ${{ secrets.STAGING_DAYMICA_RELEASE_TOKEN }}
+          APK: ${{ steps.record.outputs.package_path }}
+          VERSION: ${{ steps.record.outputs.version }}
+          CODE: ${{ steps.record.outputs.version_code }}
+          SHA: ${{ needs.guard.outputs.sha }}
+        run: |
+          set -euo pipefail
+          API='https://test-api-daymica.zysicyj.top'
+          if [ -z "${RELEASE_TOKEN:-}" ]; then echo '::warning::STAGING_DAYMICA_RELEASE_TOKEN missing; skip publish'; exit 0; fi
+          echo "::add-mask::$RELEASE_TOKEN"
+          [[ "$CODE" =~ ^[0-9]+$ ]] || { echo 'version_code invalid' >&2; exit 1; }
+          [[ "$VERSION" =~ ^[A-Za-z0-9._-]+$ ]] || { echo 'version invalid' >&2; exit 1; }
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'sha invalid' >&2; exit 1; }
+          [ -f "$APK" ] || { echo 'apk missing' >&2; exit 1; }
+          name="daymica-staging-${VERSION}-${CODE}.apk"
+          md5=$(md5sum "$APK" | cut -d' ' -f1)
+          sha256=$(sha256sum "$APK" | cut -d' ' -f1)
+          size=$(stat -c %s "$APK")
+          body="$RUNNER_TEMP/publish-body.json"
+          hdr="$RUNNER_TEMP/publish-headers"
+          trap 'rm -f "$hdr" "$body"' EXIT
+          umask 077
+          printf 'X-Daymica-Release-Token: %s\nX-App-ID: daymica\n' "$RELEASE_TOKEN" > "$hdr"
+          code=$(curl -sS -o "$body" -w '%{http_code}' --max-time 600 \
+            -H @"$hdr" \
+            -F "file=@${APK};filename=${name};type=application/vnd.android.package-archive" \
+            -F platform=android -F "version=$VERSION" -F "build_number=$CODE" \
+            -F artifact_type=apk -F "md5=$md5" -F "sha256=$sha256" \
+            "$API/api/version/upload-apk" 2>/dev/null || echo 000)
+          echo "upload-apk HTTP $code size=$size"
+          if [ "$code" = "413" ]; then echo '::error::413 from staging API: vhost client_max_body_size too small'; fi
+          if [ "$code" = "503" ]; then echo '::error::503 from staging API: releaseStorage not configured on staging backend'; fi
+          [ "$code" = "200" ] || exit 1
+          url=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["data"]["url"])' "$body")
+          case "$url" in
+            /public/releases/daymica/*) url="$API$url" ;;
+            "$API"/public/releases/daymica/*) ;;
+            *) echo 'upload url failed allowlist' >&2; exit 1 ;;
+          esac
+          payload=$(python3 -c '
+          import json, sys
+          url, ver, code, size, md5, sha256, sha = sys.argv[1:]
+          print(json.dumps({"platform": "android", "version": ver, "build_number": int(code),
+              "download_url": url, "artifact_type": "apk", "file_size": int(size),
+              "md5": md5, "sha256": sha256, "force_update": False,
+              "release_notes": "staging build " + sha[:7]}))
+          ' "$url" "$VERSION" "$CODE" "$size" "$md5" "$sha256" "$SHA")
+          code=$(curl -sS -o "$body" -w '%{http_code}' --max-time 60 -H @"$hdr" \
+            -H 'Content-Type: application/json' -d "$payload" "$API/api/version/add" 2>/dev/null || echo 000)
+          echo "version/add HTTP $code version=$VERSION build_number=$CODE"
+          case "$code" in 200|201) ;; *) exit 1 ;; esac
+          echo "staging published: $API/releases/daymica/android (build_number=$CODE)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload summary
         if: success() && contains(needs.guard.outputs.apps, format(',{0},', matrix.app))

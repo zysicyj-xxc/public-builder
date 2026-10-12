@@ -12,10 +12,11 @@ E2E is:
 
   node tools/staging-web-e2e/run.js
 
-The script body is never printed. xtrace, secret expansions, origin addresses,
-and source dumps are refused before execution. Child output is redacted.
-The child environment is an explicit allowlist: no GitHub token, no CNB
-token, no origin-ip variable. E2E logs are failed case names only.
+The script body is never printed. xtrace, secret expansions, IPv4 literals,
+and source dumps are refused before execution. The origin variable name may
+appear in the deploy script; echo and printf of that variable are refused,
+and the child environment never sets it. Child output is redacted.
+E2E logs are failed case names only.
 """
 
 import os
@@ -50,6 +51,9 @@ SECRET_VALUE = re.compile(
     r"CNB_STATUS_TOKEN|PRIVATE_REPO_ACCESS_TOKEN|GITHUB_TOKEN|CNB_TOKEN)\b"
 )
 ORIGIN_NAME = "STAGING_" + "ORIGIN_" + "IP"
+ORIGIN_PRINT = re.compile(
+    r"(?im)\b(?:echo|printf)\b[^\n]*\$\{?" + re.escape(ORIGIN_NAME) + r"\b"
+)
 LOADER = "load-daymica-secrets"
 IPV4 = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 SOURCE_DUMP = re.compile(
@@ -61,8 +65,9 @@ SOURCE_LINE = re.compile(
 )
 ANY_SOURCE = re.compile(r"(?m)^(?:source|\.)\s+\S+")
 JS_IMPORT = re.compile(
-    r"""(?m)(?:require\(\s*|from\s+)['"](\./[A-Za-z0-9._/-]+\.js)['"]"""
+    r"""(?m)(?:require\(\s*|from\s+|import\s+)['"](\./[A-Za-z0-9._/-]+\.js)['"]"""
 )
+JS_BIN = re.compile(r"""(?m)['"](bin/[A-Za-z0-9._/-]+\.js)['"]""")
 TOKEN_LEAK = re.compile(r"\b(?:ghp_|gho_|ghu_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]+")
 XTRACE_OUT = re.compile(r"^\s*\+")
 CASE_LINE = re.compile(r"(?m)^\s*(?:\d+\)|✘\s+\d+)\s+(.+?)\s*$")
@@ -83,9 +88,9 @@ def guard_text(text):
         return "rejected-xtrace"
     if VERBOSE_CURL.search(text):
         return "rejected-verbose-curl"
-    if SECRET_VALUE.search(text):
+    if SECRET_VALUE.search(text) or ORIGIN_PRINT.search(text):
         return "rejected-secret-print"
-    if ORIGIN_NAME in text or "CNB_TOKEN" in text or LOADER in text:
+    if "CNB_TOKEN" in text or LOADER in text:
         return "rejected-secret-loader"
     if IPV4.search(text):
         return "rejected-ipv4"
@@ -146,8 +151,10 @@ def guard_file(root: Path, rel: Path, seen):
             guard_file(root, Path(nested), seen)
         return
     base = path.parent
-    for match in JS_IMPORT.finditer(text):
-        nested = (base / match.group(1)).resolve()
+    rel_imports = [match.group(1) for match in JS_IMPORT.finditer(text)]
+    rel_imports.extend(match.group(1) for match in JS_BIN.finditer(text))
+    for rel_import in rel_imports:
+        nested = (base / rel_import).resolve()
         try:
             rel_nested = nested.relative_to(root.resolve())
         except ValueError:
@@ -294,8 +301,11 @@ def child_env(mode, expect_sha):
     if mode == "deploy":
         env["STAGING_WEBHOOK_DEPLOY_KEY"] = os.environ["STAGING_WEBHOOK_DEPLOY_KEY"]
     else:
+        env["GITHUB_EVENT_NAME"] = "repository_dispatch"
         env["STAGING_E2E_EMAIL"] = os.environ["STAGING_E2E_EMAIL"]
         env["STAGING_E2E_PASSWORD"] = os.environ["STAGING_E2E_PASSWORD"]
+    if ORIGIN_NAME in env:
+        fail("origin address was set")
     return env
 
 
@@ -364,11 +374,11 @@ def run_mode(mode):
     ):
         os.environ.pop(name, None)
     if mode == "deploy":
-        commands = [["bash", str(script), step] for step in steps]
+        commands = [(["bash", str(script), step], root) for step in steps]
     else:
-        commands = [["node", str(script)]]
-    for cmd in commands:
-        run_checked(cmd, root, env, secrets, mode)
+        commands = [(["node", "run.js"], root / "tools" / "staging-web-e2e")]
+    for cmd, cwd in commands:
+        run_checked(cmd, cwd, env, secrets, mode)
 
 
 def selftest():
@@ -383,7 +393,10 @@ def selftest():
     assert guard_text("curl -v https://example.com\n") == "rejected-verbose-curl"
     assert guard_text("host=10.1.2.3\n") == "rejected-ipv4"
     assert guard_text("host=8.8.8.8\n") == "rejected-ipv4"
-    assert guard_text(f"{ORIGIN_NAME}=1\n") == "rejected-secret-loader"
+    assert guard_text(f"if [ -n \"${{{ORIGIN_NAME}:-}}\" ]; then echo warn; fi\n") == ""
+    assert guard_text(f'echo "${ORIGIN_NAME}"\n') == "rejected-secret-print"
+    assert guard_text(f'printf "%s" "${{{ORIGIN_NAME}}}"\n') == "rejected-secret-print"
+    assert guard_text(f"echo {ORIGIN_NAME} is unset\n") == ""
     assert guard_text("git clone https://example.com/secrets.git\n") == "rejected-source-dump"
     assert guard_text("git diff HEAD\n") == "rejected-source-dump"
     cleaned, xtrace = redact_stream("+ curl secret\nok line\n", ["secret"])
@@ -402,12 +415,50 @@ def selftest():
         ]
     )
     assert case_names(sample) == ["opens the timeline", "saves a note"]
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    keys = (
+        "GITHUB_RUN_ID",
+        "GITHUB_SERVER_URL",
+        "GITHUB_REPOSITORY",
+        "STAGING_E2E_EMAIL",
+        "STAGING_E2E_PASSWORD",
+        "STAGING_WEBHOOK_DEPLOY_KEY",
+        ORIGIN_NAME,
+    )
+    saved = {key: os.environ.get(key) for key in keys}
+    os.environ["GITHUB_RUN_ID"] = "42"
+    os.environ["GITHUB_SERVER_URL"] = "https://github.com"
+    os.environ["GITHUB_REPOSITORY"] = "zysicyj-xxc/public-builder"
+    os.environ["STAGING_E2E_EMAIL"] = "e2e@example.com"
+    os.environ["STAGING_E2E_PASSWORD"] = "e2e-password"
+    os.environ["STAGING_WEBHOOK_DEPLOY_KEY"] = "deploy-key-value"
+    os.environ[ORIGIN_NAME] = "203.0.113.10"
+    try:
+        e2e_env = child_env("e2e", sha)
+        deploy_env = child_env("deploy", sha)
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    assert ORIGIN_NAME not in e2e_env
+    assert ORIGIN_NAME not in deploy_env
+    assert "203.0.113.10" not in e2e_env.values()
+    assert "203.0.113.10" not in deploy_env.values()
+    assert e2e_env["CI_PROVIDER"] == "github"
+    assert e2e_env["GITHUB_EVENT_NAME"] == "repository_dispatch"
+    assert deploy_env["CI_PROVIDER"] == "github"
+    assert "GITHUB_EVENT_NAME" not in deploy_env
     import tempfile
 
     tmp = Path(tempfile.mkdtemp())
     ci = tmp / "scripts" / "ci"
     ci.mkdir(parents=True)
-    (ci / "staging-deploy.sh").write_text("echo deploy-ok\n", encoding="utf-8")
+    (ci / "staging-deploy.sh").write_text(
+        f'if [ -z "${{{ORIGIN_NAME}:-}}" ]; then echo domain; fi\n',
+        encoding="utf-8",
+    )
     (ci / "bad.sh").write_text("set -x\n", encoding="utf-8")
     wrap = tmp / ".ci"
     wrap.mkdir()

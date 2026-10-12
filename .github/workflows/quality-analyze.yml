@@ -4,6 +4,8 @@
 # PRIVATE_REPO_ACCESS_TOKEN is not on the runner that executes private-repo code.
 # Checkout, Flutter 3.44.8, and token handling follow build-private*.yml. Go is 1.26.6.
 # Shell is bash; release workflows use pwsh because their payloads are different.
+# Checked-out commits must match the payload sha. Optional CNB writeback uses
+# CNB_STATUS_TOKEN and skips when that secret is empty.
 
 name: Quality Analyze
 
@@ -48,7 +50,19 @@ jobs:
       do_backend: ${{ steps.r.outputs.do_backend }}
       do_website: ${{ steps.r.outputs.do_website }}
       do_flutter: ${{ steps.r.outputs.do_flutter }}
+      pr: ${{ steps.cnb.outputs.pr }}
+      cnb_build: ${{ steps.cnb.outputs.cnb_build }}
     steps:
+      - name: Checkout public-builder
+        uses: actions/checkout@v4
+
+      - name: Self-check helpers
+        run: |
+          set -euo pipefail
+          bash .github/scripts/assert-head-sha.sh --selftest
+          python3 .github/scripts/cnb_payload.py --selftest
+          python3 .github/scripts/cnb_report.py --selftest
+
       - name: Resolve ref/sha/scopes
         id: r
         env:
@@ -231,6 +245,13 @@ jobs:
           if [ "$DO_W" = "true" ]; then post "quality/website"; fi
           if [ "$DO_F" = "true" ]; then post "quality/flutter-analyze"; fi
 
+      - name: Allowlist CNB payload fields
+        id: cnb
+        env:
+          RAW_PR: ${{ github.event.client_payload.pr }}
+          RAW_CNB_BUILD: ${{ github.event.client_payload.cnb_build }}
+        run: python3 .github/scripts/cnb_payload.py
+
   backend:
     name: backend
     needs: meta
@@ -260,6 +281,16 @@ jobs:
           ref: ${{ needs.meta.outputs.sha }}
           persist-credentials: false
           fetch-depth: 1
+      - name: Checkout public scripts
+        uses: actions/checkout@v4
+        with:
+          path: public-builder-scripts
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Check commit sha
+        env:
+          EXPECT_SHA: ${{ needs.meta.outputs.sha }}
+        run: bash public-builder-scripts/.github/scripts/assert-head-sha.sh "$EXPECT_SHA"
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26.6'
@@ -324,6 +355,16 @@ jobs:
           ref: ${{ needs.meta.outputs.sha }}
           persist-credentials: false
           fetch-depth: 1
+      - name: Checkout public scripts
+        uses: actions/checkout@v4
+        with:
+          path: public-builder-scripts
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Check commit sha
+        env:
+          EXPECT_SHA: ${{ needs.meta.outputs.sha }}
+        run: bash public-builder-scripts/.github/scripts/assert-head-sha.sh "$EXPECT_SHA"
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -350,7 +391,17 @@ jobs:
           ref: ${{ needs.meta.outputs.sha }}
           persist-credentials: false
           fetch-depth: 1
-      - uses: subosito/flutter-action@v2
+      - name: Checkout public scripts
+        uses: actions/checkout@v4
+        with:
+          path: public-builder-scripts
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Check commit sha
+        env:
+          EXPECT_SHA: ${{ needs.meta.outputs.sha }}
+        run: bash public-builder-scripts/.github/scripts/assert-head-sha.sh "$EXPECT_SHA"
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           flutter-version: '3.44.8'
           channel: 'stable'
@@ -499,3 +550,50 @@ jobs:
             -f target_url="${RUN_URL}" \
             -f description="${DESC}" \
             -f context="quality/flutter-analyze" >/dev/null
+
+  cnb-report:
+    name: cnb-report
+    needs: [meta, backend, website, flutter]
+    if: always() && needs.meta.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Write results
+        env:
+          BACKEND: ${{ needs.backend.result }}
+          WEBSITE: ${{ needs.website.result }}
+          FLUTTER: ${{ needs.flutter.result }}
+          DO_B: ${{ needs.meta.outputs.do_backend }}
+          DO_W: ${{ needs.meta.outputs.do_website }}
+          DO_F: ${{ needs.meta.outputs.do_flutter }}
+        run: |
+          set -euo pipefail
+          : > "$RUNNER_TEMP/cnb-results.tsv"
+          add() {
+            local enabled="$1" result="$2" context="$3" desc="$4" state
+            if [ "$enabled" != true ]; then
+              return 0
+            fi
+            case "$result" in
+              success) state=success ;;
+              skipped) return 0 ;;
+              cancelled) state=failure; desc="cancelled" ;;
+              *) state=failure; desc="failure" ;;
+            esac
+            printf '%s\t%s\t%s\n' "$context" "$state" "$desc" >> "$RUNNER_TEMP/cnb-results.tsv"
+          }
+          add "$DO_B" "$BACKEND" "quality/backend" "backend success"
+          add "$DO_W" "$WEBSITE" "quality/website" "website success"
+          add "$DO_F" "$FLUTTER" "quality/flutter-analyze" "flutter-analyze success"
+      - name: Report to CNB
+        env:
+          CNB_STATUS_TOKEN: ${{ secrets.CNB_STATUS_TOKEN }}
+          CNB_SHA: ${{ needs.meta.outputs.sha }}
+          CNB_PR: ${{ needs.meta.outputs.pr }}
+          CNB_BUILD: ${{ needs.meta.outputs.cnb_build }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 .github/scripts/cnb_report.py --results "$RUNNER_TEMP/cnb-results.tsv"

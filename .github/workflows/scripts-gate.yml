@@ -13,6 +13,9 @@
 # material are skipped. Their status is success with description skipped-*.
 # Runner output is paths, exit codes, and those reasons. Secret-shaped output
 # is dropped before it is logged.
+# Checked-out commits must match the payload sha. Optional CNB writeback uses
+# CNB_STATUS_TOKEN and skips when that secret is empty. The token stays off
+# the runner that executes private scripts.
 
 name: Scripts Gate
 
@@ -50,12 +53,19 @@ jobs:
       sha: ${{ steps.resolve.outputs.sha }}
       ref: ${{ steps.resolve.outputs.ref }}
       tests: ${{ steps.list.outputs.tests }}
+      pr: ${{ steps.cnb.outputs.pr }}
+      cnb_build: ${{ steps.cnb.outputs.cnb_build }}
     steps:
       - name: Checkout public-builder
         uses: actions/checkout@v4
 
       - name: Self-check classifier
-        run: python3 .github/scripts/scripts_gate_run.py --selftest
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/scripts_gate_run.py --selftest
+          bash .github/scripts/assert-head-sha.sh --selftest
+          python3 .github/scripts/cnb_payload.py --selftest
+          python3 .github/scripts/cnb_report.py --selftest
 
       - name: Allowlist ref/sha
         id: resolve
@@ -64,6 +74,13 @@ jobs:
           ref: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
           sha: ${{ github.event.client_payload.sha || github.event.inputs.sha }}
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+
+      - name: Allowlist CNB payload fields
+        id: cnb
+        env:
+          RAW_PR: ${{ github.event.client_payload.pr }}
+          RAW_CNB_BUILD: ${{ github.event.client_payload.cnb_build }}
+        run: python3 .github/scripts/cnb_payload.py
 
       - name: List script checks
         id: list
@@ -148,9 +165,6 @@ jobs:
     needs: meta
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    permissions:
-      contents: read
-      actions: write
     steps:
       - name: Checkout public-builder
         uses: actions/checkout@v4
@@ -166,6 +180,12 @@ jobs:
           path: repo
           persist-credentials: false
           fetch-depth: 1
+
+      - name: Check commit sha
+        working-directory: repo
+        env:
+          EXPECT_SHA: ${{ needs.meta.outputs.sha }}
+        run: bash "$GITHUB_WORKSPACE/runner/.github/scripts/assert-head-sha.sh" "$EXPECT_SHA"
 
       - name: Checkout public workflows for script tests
         uses: actions/checkout@v4
@@ -267,3 +287,86 @@ jobs:
             fi
             post_one "$ctx"
           done
+
+  cnb-report:
+    name: cnb-report
+    needs: [meta, verify]
+    if: always() && needs.meta.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout public scripts
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Download results
+        if: always()
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: scripts-gate-results
+          path: gate-results
+
+      - name: Write results
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+          src = "gate-results/results.tsv"
+          dst = os.environ["RUNNER_TEMP"] + "/cnb-results.tsv"
+          ctx_re = re.compile(r"^[A-Za-z0-9 ._+/()-]{1,120}$")
+          desc_ok = {
+              "success",
+              "failure",
+              "skipped-desktop",
+              "skipped-external",
+              "skipped-sensitive",
+          }
+          rows = []
+          failed_hidden = False
+          if os.path.isfile(src):
+              with open(src, encoding="utf-8") as fh:
+                  for line in fh:
+                      parts = line.rstrip("\n").split("\t")
+                      if len(parts) != 3:
+                          continue
+                      ctx, state, desc = parts
+                      if state not in ("success", "failure") or desc not in desc_ok:
+                          if state == "failure":
+                              failed_hidden = True
+                          continue
+                      if state == "failure" and desc != "failure":
+                          failed_hidden = True
+                          continue
+                      if not ctx_re.fullmatch(ctx):
+                          if state == "failure":
+                              failed_hidden = True
+                          continue
+                      rows.append((ctx, state, desc))
+          if not rows:
+              rows = [("layout + domain gates", "failure", "failure")]
+          if len(rows) > 40 or failed_hidden:
+              layout = [row for row in rows if row[0] == "layout + domain gates"][:1]
+              rest = [row for row in rows if row[0] != "layout + domain gates"]
+              state = "failure" if failed_hidden or any(row[1] == "failure" for row in rest) else "success"
+              desc = "failure" if state == "failure" else "success"
+              rows = layout + [("scripts tests", state, desc)]
+              if len(rows) > 40:
+                  rows = rows[:40]
+          with open(dst, "w", encoding="utf-8") as fh:
+              for ctx, state, desc in rows:
+                  fh.write(f"{ctx}\t{state}\t{desc}\n")
+          print(f"cnb rows {len(rows)}")
+          PY
+
+      - name: Report to CNB
+        env:
+          CNB_STATUS_TOKEN: ${{ secrets.CNB_STATUS_TOKEN }}
+          CNB_SHA: ${{ needs.meta.outputs.sha }}
+          CNB_PR: ${{ needs.meta.outputs.pr }}
+          CNB_BUILD: ${{ needs.meta.outputs.cnb_build }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 .github/scripts/cnb_report.py --results "$RUNNER_TEMP/cnb-results.tsv"

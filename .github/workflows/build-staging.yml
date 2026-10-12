@@ -6,8 +6,15 @@
 # back to the Android debug certificate inside the private staging script.
 # 测试包只作为 GitHub Actions artifact 上传，保留 1 天。公开仓库里这些 artifact 公开 1 天。
 # 不上传对象存储，不读生产签名凭据。上传前用同一脚本数生产 API 主机名，出现过就不上传。
-# This workflow does not create tags, GitHub Releases, or CNB builds.
 # repository_dispatch type is staging-build (not the production trigger-build).
+# repository_dispatch also runs scripts/ci/staging-deploy.sh build, then deploy,
+# against https://test-daymica.zysicyj.top/__staging-deploy. E2E then runs
+# npm ci and playwright chromium in tools/staging-web-e2e, then node run.js.
+# It does not run the .ci/cnb-staging-*.sh wrappers.
+# workflow_dispatch does that only when deploy=true. Deploy jobs share one
+# concurrency group so test deploys run one at a time.
+# Logs stay public: no xtrace, no secret echo, no origin address.
+# E2E failures log case names only. Screenshots are not uploaded.
 
 name: Staging Builds
 
@@ -30,6 +37,11 @@ on:
         description: 'Commit SHA (optional; wins over ref)'
         required: false
         type: string
+      deploy:
+        description: 'Upload the staging bundle and run web E2E'
+        required: false
+        default: false
+        type: boolean
   repository_dispatch:
     types: [staging-build]
 
@@ -53,6 +65,8 @@ jobs:
       sha: ${{ steps.resolve.outputs.sha }}
       ref: ${{ steps.resolve.outputs.ref }}
       apps: ${{ steps.norm.outputs.apps }}
+      pr: ${{ steps.cnb.outputs.pr }}
+      cnb_build: ${{ steps.cnb.outputs.cnb_build }}
     steps:
       - name: Checkout public-builder
         uses: actions/checkout@v4
@@ -85,6 +99,15 @@ jobs:
             echo "object-store credential name in workflow" >&2
             exit 1
           fi
+          origin=$(printf '%s%s%s' 'STAGING_' 'ORIGIN_' 'IP')
+          if grep -nF -- "$origin" "$file"; then
+            echo "origin address name in workflow" >&2
+            exit 1
+          fi
+          if grep -nE 'set[[:space:]]+-[A-Za-z]*x\b|set[[:space:]]+-o[[:space:]]+xtrace' "$file"; then
+            echo "xtrace in workflow" >&2
+            exit 1
+          fi
           python3 - "$file" <<'PY'
           import re, sys
           text = open(sys.argv[1], encoding="utf-8").read()
@@ -94,6 +117,10 @@ jobs:
               "STAGING_ANDROID_KEYSTORE_PASSWORD",
               "STAGING_ANDROID_KEY_ALIAS",
               "STAGING_ANDROID_KEY_PASSWORD",
+              "STAGING_WEBHOOK_DEPLOY_KEY",
+              "STAGING_E2E_EMAIL",
+              "STAGING_E2E_PASSWORD",
+              "CNB_STATUS_TOKEN",
           }
           bad = []
           for match in re.finditer(r"secrets\.([A-Z0-9_]+)", text):
@@ -116,12 +143,24 @@ jobs:
           set -euo pipefail
           app="${RAW_APP:-}"
           case "$GITHUB_EVENT_NAME" in
-            workflow_dispatch|repository_dispatch)
+            repository_dispatch)
               case "$app" in
-                daymica|password-vault) ;;
+                '')
+                  echo "apps=" >> "$GITHUB_OUTPUT"
+                  ;;
+                daymica|password-vault)
+                  echo "apps=,$app," >> "$GITHUB_OUTPUT"
+                  ;;
                 *) echo "app failed allowlist" >&2; exit 1 ;;
               esac
-              echo "apps=,$app," >> "$GITHUB_OUTPUT"
+              ;;
+            workflow_dispatch)
+              case "$app" in
+                daymica|password-vault)
+                  echo "apps=,$app," >> "$GITHUB_OUTPUT"
+                  ;;
+                *) echo "app failed allowlist" >&2; exit 1 ;;
+              esac
               ;;
             *)
               echo "event failed allowlist" >&2
@@ -137,9 +176,28 @@ jobs:
           sha: ${{ github.event.inputs.sha || github.event.client_payload.sha }}
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
 
+      - name: Allowlist CNB payload fields
+        id: cnb
+        shell: bash
+        env:
+          RAW_PR: ${{ github.event.client_payload.pr }}
+          RAW_CNB_BUILD: ${{ github.event.client_payload.cnb_build }}
+        run: python3 .github/scripts/cnb_payload.py
+
+      - name: Self-check staging helpers
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash .github/scripts/assert-head-sha.sh --selftest
+          bash .github/scripts/flutter_test_scopes.sh --selftest
+          python3 .github/scripts/cnb_payload.py --selftest
+          python3 .github/scripts/cnb_report.py --selftest
+          python3 .github/scripts/staging_private_run.py --selftest
+
   android:
     name: android-${{ matrix.app }}
     needs: guard
+    if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -161,13 +219,28 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
+      - name: Checkout public scripts
+        if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
+        uses: actions/checkout@v4
+        with:
+          path: public-builder-scripts
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check commit sha
+        if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
+        shell: bash
+        env:
+          EXPECT_SHA: ${{ needs.guard.outputs.sha }}
+        run: bash public-builder-scripts/.github/scripts/assert-head-sha.sh "$EXPECT_SHA"
+
       - uses: actions/setup-java@v4
         if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
         with:
           distribution: temurin
           java-version: ${{ matrix.java }}
 
-      - uses: subosito/flutter-action@v2
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
         with:
           flutter-version: '3.44.8'
@@ -368,6 +441,7 @@ jobs:
   windows:
     name: windows-${{ matrix.app }}
     needs: guard
+    if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
     runs-on: windows-latest
     timeout-minutes: 90
     strategy:
@@ -387,7 +461,22 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
-      - uses: subosito/flutter-action@v2
+      - name: Checkout public scripts
+        if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
+        uses: actions/checkout@v4
+        with:
+          path: public-builder-scripts
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check commit sha
+        if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
+        shell: bash
+        env:
+          EXPECT_SHA: ${{ needs.guard.outputs.sha }}
+        run: bash public-builder-scripts/.github/scripts/assert-head-sha.sh "$EXPECT_SHA"
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
         with:
           flutter-version: '3.44.8'
@@ -540,3 +629,144 @@ jobs:
           path: ${{ runner.temp }}/staging-build-summary.txt
           retention-days: 1
           if-no-files-found: error
+
+  staging-deploy:
+    name: staging-deploy
+    needs: guard
+    if: github.event_name == 'repository_dispatch' || inputs.deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    concurrency:
+      group: staging-deploy
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout public scripts
+        uses: actions/checkout@v4
+        with:
+          path: public-builder-scripts
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.guard.outputs.sha }}
+          path: repo
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check commit sha
+        working-directory: repo
+        env:
+          EXPECT_SHA: ${{ needs.guard.outputs.sha }}
+        run: bash "$GITHUB_WORKSPACE/public-builder-scripts/.github/scripts/assert-head-sha.sh" "$EXPECT_SHA"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.6'
+
+      - name: Read Flutter version
+        id: flutter
+        working-directory: repo
+        run: |
+          set -euo pipefail
+          ver=3.44.8
+          if [ -f .flutter-version ]; then
+            ver=$(tr -d '[:space:]' < .flutter-version)
+          fi
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: flutter version failed allowlist" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: ${{ steps.flutter.outputs.version }}
+          channel: stable
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build and deploy staging bundle
+        working-directory: repo
+        env:
+          EXPECT_SHA: ${{ needs.guard.outputs.sha }}
+          STAGING_WEBHOOK_DEPLOY_KEY: ${{ secrets.STAGING_WEBHOOK_DEPLOY_KEY }}
+        run: python3 "$GITHUB_WORKSPACE/public-builder-scripts/.github/scripts/staging_private_run.py" deploy
+
+      - name: Install staging web E2E
+        if: success()
+        working-directory: repo/tools/staging-web-e2e
+        run: |
+          set -euo pipefail
+          if [ ! -f package-lock.json ]; then
+            echo "ERROR: missing tools/staging-web-e2e/package-lock.json" >&2
+            exit 1
+          fi
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Staging web E2E
+        if: success()
+        working-directory: repo
+        env:
+          EXPECT_SHA: ${{ needs.guard.outputs.sha }}
+          STAGING_E2E_EMAIL: ${{ secrets.STAGING_E2E_EMAIL }}
+          STAGING_E2E_PASSWORD: ${{ secrets.STAGING_E2E_PASSWORD }}
+        run: python3 "$GITHUB_WORKSPACE/public-builder-scripts/.github/scripts/staging_private_run.py" e2e
+
+  cnb-report:
+    name: cnb-report
+    needs: [guard, staging-deploy]
+    if: always() && needs.guard.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout public scripts
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Write results
+        env:
+          DEPLOY_RESULT: ${{ needs.staging-deploy.result }}
+        run: |
+          set -euo pipefail
+          case "$DEPLOY_RESULT" in
+            success) state=success; desc="staging-deploy success" ;;
+            skipped) exit 0 ;;
+            cancelled) state=failure; desc="staging-deploy cancelled" ;;
+            *) state=failure; desc="staging-deploy failure" ;;
+          esac
+          if ! printf '%s' "$desc" | grep -Eq '^[A-Za-z0-9 ._+/():-]{1,120}$'; then
+            echo "ERROR: description failed allowlist" >&2
+            exit 1
+          fi
+          printf 'staging/deploy-e2e\t%s\t%s\n' "$state" "$desc" > "$RUNNER_TEMP/cnb-results.tsv"
+
+      - name: Report to CNB
+        env:
+          CNB_STATUS_TOKEN: ${{ secrets.CNB_STATUS_TOKEN }}
+          CNB_SHA: ${{ needs.guard.outputs.sha }}
+          CNB_PR: ${{ needs.guard.outputs.pr }}
+          CNB_BUILD: ${{ needs.guard.outputs.cnb_build }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ ! -f "$RUNNER_TEMP/cnb-results.tsv" ]; then
+            echo "no cnb results; skip"
+            exit 0
+          fi
+          python3 .github/scripts/cnb_report.py --results "$RUNNER_TEMP/cnb-results.tsv"

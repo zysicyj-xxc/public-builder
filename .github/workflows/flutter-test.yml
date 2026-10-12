@@ -8,6 +8,11 @@
 # Other dispatches write no status for the job they skip.
 # workflow_dispatch input only=shared_package runs that package on the given
 # SHA, skips path filters, and does not run or status mail-box.
+# scopes, when non-empty, replace path filters:
+#   flutter  -> flutter test shared_package, footprint, eye-care, admin-app
+#   daymica  -> flutter test apps/daymica
+#   mailbox  -> flutter test apps/mail-box (alias mail-box)
+# Checked-out commits must match the payload sha.
 #
 # Trust boundary: repository_dispatch client_payload and workflow_dispatch
 # inputs are untrusted. Allowlist ref/sha before any API call. Status posts
@@ -35,6 +40,11 @@ on:
         required: false
         type: string
         default: ''
+      scopes:
+        description: 'Comma list: flutter,daymica,mailbox. Non-empty replaces path filters.'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -56,12 +66,24 @@ jobs:
       sha: ${{ steps.resolve.outputs.sha }}
       run: ${{ steps.paths.outputs.run }}
       shared_package: ${{ steps.paths.outputs.shared_package }}
+      flutter: ${{ steps.scopes.outputs.flutter }}
+      daymica: ${{ steps.scopes.outputs.daymica }}
+      mailbox: ${{ steps.scopes.outputs.mailbox }}
+      explicit: ${{ steps.scopes.outputs.explicit }}
+      pr: ${{ steps.cnb.outputs.pr }}
+      cnb_build: ${{ steps.cnb.outputs.cnb_build }}
     steps:
       - name: Checkout public-builder
         uses: actions/checkout@v4
 
       - name: Self-check path matcher
-        run: bash .github/scripts/flutter_test_paths.sh --selftest
+        run: |
+          set -euo pipefail
+          bash .github/scripts/flutter_test_paths.sh --selftest
+          bash .github/scripts/flutter_test_scopes.sh --selftest
+          bash .github/scripts/assert-head-sha.sh --selftest
+          python3 .github/scripts/cnb_payload.py --selftest
+          python3 .github/scripts/cnb_report.py --selftest
 
       - name: Allowlist ref/sha
         id: resolve
@@ -71,8 +93,22 @@ jobs:
           sha: ${{ github.event.client_payload.sha || github.event.inputs.sha }}
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
 
+      - name: Allowlist scopes
+        id: scopes
+        env:
+          RAW_SCOPES: ${{ github.event.client_payload.scopes || github.event.inputs.scopes }}
+        run: bash .github/scripts/flutter_test_scopes.sh
+
+      - name: Allowlist CNB payload fields
+        id: cnb
+        env:
+          RAW_PR: ${{ github.event.client_payload.pr }}
+          RAW_CNB_BUILD: ${{ github.event.client_payload.cnb_build }}
+        run: python3 .github/scripts/cnb_payload.py
+
       - name: Decide from private diff
         id: paths
+        if: steps.scopes.outputs.explicit != 'true'
         env:
           REF: ${{ steps.resolve.outputs.ref }}
           SHA: ${{ steps.resolve.outputs.sha }}
@@ -127,7 +163,9 @@ jobs:
           fi
 
       - name: Set pending status
-        if: steps.paths.outputs.run == 'true' && github.event.inputs.only != 'shared_package'
+        if: >-
+          (steps.scopes.outputs.explicit != 'true' && steps.paths.outputs.run == 'true' && github.event.inputs.only != 'shared_package')
+          || steps.scopes.outputs.mailbox == 'true'
         env:
           SHA: ${{ steps.resolve.outputs.sha }}
           GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
@@ -145,7 +183,7 @@ jobs:
             -f context="flutter-test (mail-box)" >/dev/null
 
       - name: Set shared_package pending status
-        if: steps.paths.outputs.shared_package == '1' || github.event.inputs.only == 'shared_package'
+        if: steps.scopes.outputs.explicit != 'true' && (steps.paths.outputs.shared_package == '1' || github.event.inputs.only == 'shared_package')
         env:
           SHA: ${{ steps.resolve.outputs.sha }}
           GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
@@ -162,10 +200,48 @@ jobs:
             -f description="running on public-builder" \
             -f context="flutter-test (shared_package)" >/dev/null
 
+      - name: Set daymica pending status
+        if: steps.scopes.outputs.daymica == 'true'
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "ERROR: sha failed allowlist" >&2
+            exit 1
+          fi
+          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
+            -f state="pending" \
+            -f target_url="${RUN_URL}" \
+            -f description="running on public-builder" \
+            -f context="flutter-test (daymica)" >/dev/null
+
+      - name: Set general pending status
+        if: steps.scopes.outputs.flutter == 'true'
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "ERROR: sha failed allowlist" >&2
+            exit 1
+          fi
+          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
+            -f state="pending" \
+            -f target_url="${RUN_URL}" \
+            -f description="running on public-builder" \
+            -f context="flutter-test (general)" >/dev/null
+
   test:
     name: flutter-test (mail-box)
     needs: meta
-    if: needs.meta.outputs.run == 'true' && github.event.inputs.only != 'shared_package'
+    if: >-
+      (needs.meta.outputs.explicit != 'true' && needs.meta.outputs.run == 'true' && github.event.inputs.only != 'shared_package')
+      || needs.meta.outputs.mailbox == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -176,6 +252,18 @@ jobs:
           ref: ${{ needs.meta.outputs.sha }}
           persist-credentials: false
           fetch-depth: 1
+
+      - name: Checkout public scripts
+        uses: actions/checkout@v4
+        with:
+          path: public-builder-scripts
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check commit sha
+        env:
+          EXPECT_SHA: ${{ needs.meta.outputs.sha }}
+        run: bash public-builder-scripts/.github/scripts/assert-head-sha.sh "$EXPECT_SHA"
 
       - name: Read Flutter version
         id: flutter
@@ -193,7 +281,7 @@ jobs:
           echo "version=$ver" >> "$GITHUB_OUTPUT"
           echo "flutter-version=$ver"
 
-      - uses: subosito/flutter-action@v2
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           flutter-version: ${{ steps.flutter.outputs.version }}
           channel: stable
@@ -213,7 +301,12 @@ jobs:
   report:
     name: post-status
     needs: [meta, test]
-    if: always() && needs.meta.result == 'success' && needs.meta.outputs.run == 'true' && github.event.inputs.only != 'shared_package'
+    if: >-
+      always() && needs.meta.result == 'success' &&
+      (
+        (needs.meta.outputs.explicit != 'true' && needs.meta.outputs.run == 'true' && github.event.inputs.only != 'shared_package')
+        || needs.meta.outputs.mailbox == 'true'
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -244,7 +337,7 @@ jobs:
   test_shared:
     name: flutter-test (shared_package)
     needs: meta
-    if: needs.meta.outputs.shared_package == '1' || github.event.inputs.only == 'shared_package'
+    if: needs.meta.outputs.explicit != 'true' && (needs.meta.outputs.shared_package == '1' || github.event.inputs.only == 'shared_package')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -255,6 +348,18 @@ jobs:
           ref: ${{ needs.meta.outputs.sha }}
           persist-credentials: false
           fetch-depth: 1
+
+      - name: Checkout public scripts
+        uses: actions/checkout@v4
+        with:
+          path: public-builder-scripts
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check commit sha
+        env:
+          EXPECT_SHA: ${{ needs.meta.outputs.sha }}
+        run: bash public-builder-scripts/.github/scripts/assert-head-sha.sh "$EXPECT_SHA"
 
       - name: Read Flutter version
         id: flutter
@@ -273,7 +378,7 @@ jobs:
           echo "version=$ver" >> "$GITHUB_OUTPUT"
           echo "flutter-version=$ver"
 
-      - uses: subosito/flutter-action@v2
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           flutter-version: ${{ steps.flutter.outputs.version }}
           channel: stable
@@ -322,7 +427,7 @@ jobs:
   report_shared:
     name: post-status (shared_package)
     needs: [meta, test_shared]
-    if: always() && needs.meta.result == 'success' && (needs.meta.outputs.shared_package == '1' || github.event.inputs.only == 'shared_package')
+    if: always() && needs.meta.result == 'success' && needs.meta.outputs.explicit != 'true' && (needs.meta.outputs.shared_package == '1' || github.event.inputs.only == 'shared_package')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -349,3 +454,239 @@ jobs:
             -f target_url="${RUN_URL}" \
             -f description="$desc" \
             -f context="flutter-test (shared_package)" >/dev/null
+
+  test_daymica:
+    name: flutter-test (daymica)
+    needs: meta
+    if: needs.meta.outputs.daymica == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.meta.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Checkout public scripts
+        uses: actions/checkout@v4
+        with:
+          path: public-builder-scripts
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check commit sha
+        env:
+          EXPECT_SHA: ${{ needs.meta.outputs.sha }}
+        run: bash public-builder-scripts/.github/scripts/assert-head-sha.sh "$EXPECT_SHA"
+
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: ${{ steps.flutter.outputs.version }}
+          channel: stable
+          cache: true
+
+      - name: flutter pub get and test
+        working-directory: apps/daymica
+        run: |
+          set -euo pipefail
+          if [ ! -f pubspec.yaml ]; then
+            echo "ERROR: missing apps/daymica/pubspec.yaml" >&2
+            exit 1
+          fi
+          flutter pub get
+          flutter test
+
+  report_daymica:
+    name: post-status (daymica)
+    needs: [meta, test_daymica]
+    if: always() && needs.meta.result == 'success' && needs.meta.outputs.daymica == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Post conclusion
+        env:
+          SHA: ${{ needs.meta.outputs.sha }}
+          RESULT: ${{ needs.test_daymica.result }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "ERROR: sha failed allowlist" >&2
+            exit 1
+          fi
+          case "$RESULT" in
+            success) state=success; desc=success ;;
+            cancelled) state=failure; desc=cancelled ;;
+            *) state=failure; desc=failure ;;
+          esac
+          echo "status flutter-test (daymica) ${state}"
+          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
+            -f state="$state" \
+            -f target_url="${RUN_URL}" \
+            -f description="$desc" \
+            -f context="flutter-test (daymica)" >/dev/null
+
+  test_general:
+    name: flutter-test (general)
+    needs: meta
+    if: needs.meta.outputs.flutter == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.meta.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Checkout public scripts
+        uses: actions/checkout@v4
+        with:
+          path: public-builder-scripts
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check commit sha
+        env:
+          EXPECT_SHA: ${{ needs.meta.outputs.sha }}
+        run: bash public-builder-scripts/.github/scripts/assert-head-sha.sh "$EXPECT_SHA"
+
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: ${{ steps.flutter.outputs.version }}
+          channel: stable
+          cache: true
+
+      - name: flutter pub get and test
+        run: |
+          set -euo pipefail
+          apps=(
+            apps/shared_package
+            apps/footprint
+            apps/eye-care
+            apps/admin-app
+          )
+          for d in "${apps[@]}"; do
+            if [ ! -f "${d}/pubspec.yaml" ]; then
+              echo "ERROR: missing ${d}/pubspec.yaml" >&2
+              exit 1
+            fi
+            echo "== flutter test ${d} =="
+            (
+              cd "$d"
+              flutter pub get
+              flutter test
+            )
+          done
+
+  report_general:
+    name: post-status (general)
+    needs: [meta, test_general]
+    if: always() && needs.meta.result == 'success' && needs.meta.outputs.flutter == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Post conclusion
+        env:
+          SHA: ${{ needs.meta.outputs.sha }}
+          RESULT: ${{ needs.test_general.result }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "ERROR: sha failed allowlist" >&2
+            exit 1
+          fi
+          case "$RESULT" in
+            success) state=success; desc=success ;;
+            cancelled) state=failure; desc=cancelled ;;
+            *) state=failure; desc=failure ;;
+          esac
+          echo "status flutter-test (general) ${state}"
+          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
+            -f state="$state" \
+            -f target_url="${RUN_URL}" \
+            -f description="$desc" \
+            -f context="flutter-test (general)" >/dev/null
+
+  cnb-report:
+    name: cnb-report
+    needs: [meta, test, test_shared, test_daymica, test_general]
+    if: always() && needs.meta.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Write results
+        env:
+          MAILBOX: ${{ needs.test.result }}
+          SHARED: ${{ needs.test_shared.result }}
+          DAYMICA: ${{ needs.test_daymica.result }}
+          GENERAL: ${{ needs.test_general.result }}
+        run: |
+          set -euo pipefail
+          : > "$RUNNER_TEMP/cnb-results.tsv"
+          add() {
+            local result="$1" context="$2" state desc
+            case "$result" in
+              success) state=success; desc=success ;;
+              skipped) return 0 ;;
+              cancelled) state=failure; desc=cancelled ;;
+              *) state=failure; desc=failure ;;
+            esac
+            printf '%s\t%s\t%s\n' "$context" "$state" "$desc" >> "$RUNNER_TEMP/cnb-results.tsv"
+          }
+          add "$MAILBOX" "flutter-test (mail-box)"
+          add "$SHARED" "flutter-test (shared_package)"
+          add "$DAYMICA" "flutter-test (daymica)"
+          add "$GENERAL" "flutter-test (general)"
+      - name: Report to CNB
+        env:
+          CNB_STATUS_TOKEN: ${{ secrets.CNB_STATUS_TOKEN }}
+          CNB_SHA: ${{ needs.meta.outputs.sha }}
+          CNB_PR: ${{ needs.meta.outputs.pr }}
+          CNB_BUILD: ${{ needs.meta.outputs.cnb_build }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 .github/scripts/cnb_report.py --results "$RUNNER_TEMP/cnb-results.tsv"

@@ -7,11 +7,13 @@
 # 测试包只作为 GitHub Actions artifact 上传，保留 1 天。公开仓库里这些 artifact 公开 1 天。
 # 不上传对象存储，不读生产签名凭据。上传前用同一脚本数生产 API 主机名，出现过就不上传。
 # repository_dispatch type is staging-build (not the production trigger-build).
-# repository_dispatch also packages the private staging bundle and uploads it to
-# https://test-daymica.zysicyj.top/__staging-deploy, then runs staging web E2E.
+# repository_dispatch also runs scripts/ci/staging-deploy.sh build, then deploy,
+# against https://test-daymica.zysicyj.top/__staging-deploy, then node
+# tools/staging-web-e2e/run.js. It does not run the .ci/cnb-staging-*.sh wrappers.
 # workflow_dispatch does that only when deploy=true. Deploy jobs share one
 # concurrency group so test deploys run one at a time.
-# Logs stay public: no xtrace, no secret echo, no origin address, screenshots only.
+# Logs stay public: no xtrace, no secret echo, no origin address.
+# E2E failures log case names only. Screenshots are not uploaded.
 
 name: Staging Builds
 
@@ -237,7 +239,7 @@ jobs:
           distribution: temurin
           java-version: ${{ matrix.java }}
 
-      - uses: subosito/flutter-action@v2
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
         with:
           flutter-version: '3.44.8'
@@ -473,7 +475,7 @@ jobs:
           EXPECT_SHA: ${{ needs.guard.outputs.sha }}
         run: bash public-builder-scripts/.github/scripts/assert-head-sha.sh "$EXPECT_SHA"
 
-      - uses: subosito/flutter-action@v2
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
         with:
           flutter-version: '3.44.8'
@@ -682,7 +684,7 @@ jobs:
           fi
           echo "version=$ver" >> "$GITHUB_OUTPUT"
 
-      - uses: subosito/flutter-action@v2
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           flutter-version: ${{ steps.flutter.outputs.version }}
           channel: stable
@@ -692,7 +694,7 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Package and upload staging bundle
+      - name: Build and deploy staging bundle
         working-directory: repo
         env:
           EXPECT_SHA: ${{ needs.guard.outputs.sha }}
@@ -707,23 +709,6 @@ jobs:
           STAGING_E2E_EMAIL: ${{ secrets.STAGING_E2E_EMAIL }}
           STAGING_E2E_PASSWORD: ${{ secrets.STAGING_E2E_PASSWORD }}
         run: python3 "$GITHUB_WORKSPACE/public-builder-scripts/.github/scripts/staging_private_run.py" e2e
-
-      - name: Collect failure screenshots
-        if: always()
-        run: python3 "$GITHUB_WORKSPACE/public-builder-scripts/.github/scripts/staging_private_run.py" --collect "$GITHUB_WORKSPACE/repo" "$RUNNER_TEMP/e2e-screenshots"
-
-      - name: Upload failure screenshots
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: staging-e2e-screenshots
-          path: |
-            ${{ runner.temp }}/e2e-screenshots/*.png
-            ${{ runner.temp }}/e2e-screenshots/*.jpg
-            ${{ runner.temp }}/e2e-screenshots/*.jpeg
-            ${{ runner.temp }}/e2e-screenshots/*.webp
-          retention-days: 1
-          if-no-files-found: ignore
 
   cnb-report:
     name: cnb-report

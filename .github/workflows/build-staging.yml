@@ -539,7 +539,8 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $app = $env:APP_SLUG
           if ($app -notin @('daymica', 'password-vault', 'yaoxiaobai', 'mail-box', 'water-tracker', 'eye-care')) { throw 'app failed allowlist' }
-          $pub = Join-Path "apps/$app" 'pubspec.yaml'
+          $pubRel = if ($app -eq 'yaoxiaobai') { 'apps/yaoxiaobai/yaoxiaobai_app' } else { "apps/$app" }
+          $pub = Join-Path $pubRel 'pubspec.yaml'
           $versionLine = @(Select-String -LiteralPath $pub -Pattern '^version:\s*\S+' | Select-Object -First 1)
           if (-not $versionLine) { throw 'pubspec version missing' }
           $version = ($versionLine.Line -replace '^version:\s*', '').Trim().Trim('"').Trim("'")

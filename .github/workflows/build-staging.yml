@@ -586,7 +586,7 @@ jobs:
             "artifact=$artifact"
             "ref=$($env:RESOLVED_SHA)"
           ) | Set-Content -LiteralPath $summary -Encoding utf8NoBOM
-          $release = Join-Path "apps/$app/build/windows/x64/runner" "Release"
+          $release = Join-Path "$pubRel/build/windows/x64/runner" "Release"
           if (Test-Path -LiteralPath $release -PathType Container) {
             $scan = (Resolve-Path -LiteralPath $release).Path
           } elseif ($pkgPath -match '(?i)\.zip$') {

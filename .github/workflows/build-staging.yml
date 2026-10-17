@@ -1,4 +1,5 @@
-# Staging packages for daymica and password-vault only.
+# Staging packages for daymica, password-vault, yaoxiaobai, mail-box,
+# water-tracker (Android + Windows) and eye-care (Windows only).
 # Trust boundary: workflow_dispatch inputs and repository_dispatch client_payload are untrusted.
 # ref/sha pass through resolve-private-ref before checkout. Checkout uses
 # PRIVATE_REPO_ACCESS_TOKEN and persist-credentials: false.
@@ -15,12 +16,21 @@ on:
   workflow_dispatch:
     inputs:
       app:
-        description: 'daymica or password-vault'
+        description: 'staging app slug'
         required: true
         type: choice
         options:
           - daymica
           - password-vault
+          - yaoxiaobai
+          - mail-box
+          - water-tracker
+          - eye-care
+      publish:
+        description: 'Register to staging backend (needs STAGING_*_RELEASE_TOKEN)'
+        required: false
+        default: false
+        type: boolean
       ref:
         description: 'Git ref of zysicyj-xxc/zysicyj (default main)'
         required: false
@@ -53,6 +63,7 @@ jobs:
       sha: ${{ steps.resolve.outputs.sha }}
       ref: ${{ steps.resolve.outputs.ref }}
       apps: ${{ steps.norm.outputs.apps }}
+      publish: ${{ steps.norm.outputs.publish }}
     steps:
       - name: Checkout public-builder
         uses: actions/checkout@v4
@@ -94,6 +105,8 @@ jobs:
               "STAGING_ANDROID_KEYSTORE_PASSWORD",
               "STAGING_ANDROID_KEY_ALIAS",
               "STAGING_ANDROID_KEY_PASSWORD",
+              "STAGING_DAYMICA_RELEASE_TOKEN",
+              "STAGING_YAOXIAOBAI_RELEASE_TOKEN",
           }
           bad = []
           for match in re.finditer(r"secrets\.([A-Z0-9_]+)", text):
@@ -112,16 +125,20 @@ jobs:
         shell: bash
         env:
           RAW_APP: ${{ github.event.inputs.app || github.event.client_payload.app }}
+          RAW_PUBLISH: ${{ github.event.inputs.publish || github.event.client_payload.publish }}
         run: |
           set -euo pipefail
           app="${RAW_APP:-}"
           case "$GITHUB_EVENT_NAME" in
             workflow_dispatch|repository_dispatch)
               case "$app" in
-                daymica|password-vault) ;;
+                daymica|password-vault|yaoxiaobai|mail-box|water-tracker|eye-care) ;;
                 *) echo "app failed allowlist" >&2; exit 1 ;;
               esac
               echo "apps=,$app," >> "$GITHUB_OUTPUT"
+              publish=false
+              if [ "${RAW_PUBLISH:-}" = "true" ]; then publish=true; fi
+              echo "publish=$publish" >> "$GITHUB_OUTPUT"
               ;;
             *)
               echo "event failed allowlist" >&2
@@ -149,6 +166,12 @@ jobs:
           - app: daymica
             java: '21'
           - app: password-vault
+            java: '17'
+          - app: yaoxiaobai
+            java: '17'
+          - app: mail-box
+            java: '17'
+          - app: water-tracker
             java: '17'
     steps:
       - name: Checkout private repo
@@ -206,7 +229,7 @@ jobs:
           STAGING_ANDROID_KEY_PASSWORD: ${{ secrets.STAGING_ANDROID_KEY_PASSWORD }}
         run: |
           $ErrorActionPreference = 'Stop'
-          if ($env:APP_SLUG -notin @('daymica', 'password-vault')) { throw 'app failed allowlist' }
+          if ($env:APP_SLUG -notin @('daymica', 'password-vault', 'yaoxiaobai', 'mail-box', 'water-tracker')) { throw 'app failed allowlist' }
           $env:TMPDIR = $env:RUNNER_TEMP
           $env:TEMP = $env:RUNNER_TEMP
           $env:TMP = $env:RUNNER_TEMP
@@ -222,7 +245,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $app = $env:APP_SLUG
-          if ($app -notin @('daymica', 'password-vault')) { throw 'app failed allowlist' }
+          if ($app -notin @('daymica', 'password-vault', 'yaoxiaobai', 'mail-box', 'water-tracker')) { throw 'app failed allowlist' }
           $sdk = if ($env:ANDROID_SDK_ROOT) { $env:ANDROID_SDK_ROOT } else { $env:ANDROID_HOME }
           if (-not $sdk) { throw 'ANDROID_HOME missing' }
           $bt = Get-ChildItem -LiteralPath (Join-Path $sdk 'build-tools') -Directory |
@@ -275,7 +298,7 @@ jobs:
           $safeVer = ([string]$chosen.Version -replace '[^A-Za-z0-9._-]', '-').Trim('-')
           if (-not $safeVer) { $safeVer = 'unknown' }
           $artifact = "staging-$app-android-$safeVer-$short"
-          if ($artifact -notmatch '^staging-(daymica|password-vault)-android-[A-Za-z0-9._-]+-[0-9a-f]{7}$') {
+          if ($artifact -notmatch '^staging-(daymica|password-vault|yaoxiaobai|mail-box|water-tracker)-android-[A-Za-z0-9._-]+-[0-9a-f]{7}$') {
             throw 'artifact name failed allowlist'
           }
           $pkgPath = $chosen.Apk.FullName
@@ -308,6 +331,8 @@ jobs:
           @(
             "artifact_name=$artifact"
             "package_path=$pkgPath"
+            "version=$($chosen.Version)"
+            "version_code=$($chosen.Code)"
           ) | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8NoBOM
           Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "app=$app platform=android version=$($chosen.Version) artifact=$artifact" -Encoding utf8NoBOM
 
@@ -356,6 +381,75 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+# Staging-only publish: upload to the staging backend and register a staging version.
+      # Host is hard-coded to the staging API; only staging release tokens are used.
+      # Logs print status codes and the staging path only, never tokens or bodies.
+      # Missing token skips publish (artifact-only), never fails the build.
+      - name: Publish Android to staging backend
+        if: success() && needs.guard.outputs.publish == 'true' && contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
+        shell: bash
+        env:
+          APP_SLUG: ${{ matrix.app }}
+          TOKEN_DEFAULT: ${{ secrets.STAGING_DAYMICA_RELEASE_TOKEN }}
+          TOKEN_YAOXIAOBAI: ${{ secrets.STAGING_YAOXIAOBAI_RELEASE_TOKEN }}
+          PKG: ${{ steps.record.outputs.package_path }}
+          VERSION: ${{ steps.record.outputs.version }}
+          CODE: ${{ steps.record.outputs.version_code }}
+          SHA: ${{ needs.guard.outputs.sha }}
+        run: |
+          set -euo pipefail
+          API='https://test-api-daymica.zysicyj.top'
+          app="$APP_SLUG"
+          case "$app" in
+            daymica|password-vault|mail-box|water-tracker)
+              base="$API/api/version"; hdr_name='X-Daymica-Release-Token'; token="$TOKEN_DEFAULT" ;;
+            yaoxiaobai)
+              base="$API/api/yaoxiaobai/version"; hdr_name='X-YaoXiaoBai-Release-Token'; token="$TOKEN_YAOXIAOBAI" ;;
+            *) echo "app failed publish allowlist" >&2; exit 1 ;;
+          esac
+          if [ -z "${token:-}" ]; then echo "::warning::staging release token missing for $app; skip publish"; exit 0; fi
+          echo "::add-mask::$token"
+          [[ "$CODE" =~ ^[0-9]+$ ]] || { echo 'version_code invalid' >&2; exit 1; }
+          [[ "$VERSION" =~ ^[A-Za-z0-9._-]+$ ]] || { echo 'version invalid' >&2; exit 1; }
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'sha invalid' >&2; exit 1; }
+          [ -f "$PKG" ] || { echo 'package missing' >&2; exit 1; }
+          name="$app-staging-$VERSION-$CODE.apk"
+          md5=$(md5sum "$PKG" | cut -d' ' -f1)
+          sha256=$(sha256sum "$PKG" | cut -d' ' -f1)
+          size=$(stat -c %s "$PKG")
+          body="$RUNNER_TEMP/publish-body.json"
+          hdr="$RUNNER_TEMP/publish-headers"
+          trap 'rm -f "$hdr" "$body"' EXIT
+          umask 077
+          printf '%s: %s\nX-App-ID: %s\n' "$hdr_name" "$token" "$app" > "$hdr"
+          code=$(curl -sS -o "$body" -w '%{http_code}' --max-time 600 \
+            -H @"$hdr" \
+            -F "file=@${PKG};filename=${name};type=application/vnd.android.package-archive" \
+            -F platform=android -F "version=$VERSION" -F "build_number=$CODE" \
+            -F artifact_type=apk -F "md5=$md5" -F "sha256=$sha256" \
+            "$base/upload-apk" 2>/dev/null || echo 000)
+          echo "upload-apk HTTP $code app=$app size=$size"
+          [ "$code" = "200" ] || exit 1
+          url=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["data"]["url"])' "$body")
+          case "$url" in
+            /public/releases/$app/*) url="$API$url" ;;
+            "$API"/public/releases/$app/*) ;;
+            *) echo 'upload url failed allowlist' >&2; exit 1 ;;
+          esac
+          payload=$(python3 -c '
+          import json, sys
+          url, ver, code, size, md5, sha256, sha = sys.argv[1:]
+          print(json.dumps({"platform": "android", "version": ver, "build_number": int(code),
+              "download_url": url, "artifact_type": "apk", "file_size": int(size),
+              "md5": md5, "sha256": sha256, "force_update": False,
+              "release_notes": "staging build " + sha[:7]}))
+          ' "$url" "$VERSION" "$CODE" "$size" "$md5" "$sha256" "$SHA")
+          code=$(curl -sS -o "$body" -w '%{http_code}' --max-time 60 -H @"$hdr" \
+            -H 'Content-Type: application/json' -d "$payload" "$base/add" 2>/dev/null || echo 000)
+          echo "version/add HTTP $code app=$app version=$VERSION build_number=$CODE"
+          case "$code" in 200|201) ;; *) exit 1 ;; esac
+          echo "staging published: $API/releases/$app/android (build_number=$CODE)" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload summary
         if: success() && contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
         uses: actions/upload-artifact@v4
@@ -376,6 +470,10 @@ jobs:
         include:
           - app: daymica
           - app: password-vault
+          - app: yaoxiaobai
+          - app: mail-box
+          - app: water-tracker
+          - app: eye-care
     steps:
       - name: Checkout private repo
         if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
@@ -427,7 +525,7 @@ jobs:
           APP_SLUG: ${{ matrix.app }}
         run: |
           $ErrorActionPreference = 'Stop'
-          if ($env:APP_SLUG -notin @('daymica', 'password-vault')) { throw 'app failed allowlist' }
+          if ($env:APP_SLUG -notin @('daymica', 'password-vault', 'yaoxiaobai', 'mail-box', 'water-tracker', 'eye-care')) { throw 'app failed allowlist' }
           & ./scripts/build-flutter-windows-staging.ps1 -NoClean -AppSlug $env:APP_SLUG
           if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -440,7 +538,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $app = $env:APP_SLUG
-          if ($app -notin @('daymica', 'password-vault')) { throw 'app failed allowlist' }
+          if ($app -notin @('daymica', 'password-vault', 'yaoxiaobai', 'mail-box', 'water-tracker', 'eye-care')) { throw 'app failed allowlist' }
           $pub = Join-Path "apps/$app" 'pubspec.yaml'
           $versionLine = @(Select-String -LiteralPath $pub -Pattern '^version:\s*\S+' | Select-Object -First 1)
           if (-not $versionLine) { throw 'pubspec version missing' }
@@ -461,7 +559,7 @@ jobs:
           $safeVer = ([string]$version -replace '[^A-Za-z0-9._-]', '-').Trim('-')
           if (-not $safeVer) { $safeVer = 'unknown' }
           $artifact = "staging-$app-windows-$safeVer-$short"
-          if ($artifact -notmatch '^staging-(daymica|password-vault)-windows-[A-Za-z0-9._-]+-[0-9a-f]{7}$') {
+          if ($artifact -notmatch '^staging-(daymica|password-vault|yaoxiaobai|mail-box|water-tracker|eye-care)-windows-[A-Za-z0-9._-]+-[0-9a-f]{7}$') {
             throw 'artifact name failed allowlist'
           }
           $pkgPath = $pick.FullName
@@ -500,6 +598,7 @@ jobs:
           @(
             "artifact_name=$artifact"
             "package_path=$pkgPath"
+            "version=$version"
           ) | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8NoBOM
           Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "app=$app platform=windows version=$version artifact=$artifact" -Encoding utf8NoBOM
 
@@ -531,6 +630,74 @@ jobs:
           path: ${{ steps.record.outputs.package_path }}
           retention-days: 1
           if-no-files-found: error
+
+# Windows staging publish: same staging backend, artifact_type=exe only.
+      - name: Publish Windows to staging backend
+        if: success() && needs.guard.outputs.publish == 'true' && contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
+        shell: bash
+        env:
+          APP_SLUG: ${{ matrix.app }}
+          TOKEN_DEFAULT: ${{ secrets.STAGING_DAYMICA_RELEASE_TOKEN }}
+          TOKEN_YAOXIAOBAI: ${{ secrets.STAGING_YAOXIAOBAI_RELEASE_TOKEN }}
+          PKG: ${{ steps.record.outputs.package_path }}
+          VERSION_FULL: ${{ steps.record.outputs.version }}
+          SHA: ${{ needs.guard.outputs.sha }}
+        run: |
+          set -euo pipefail
+          API='https://test-api-daymica.zysicyj.top'
+          app="$APP_SLUG"
+          case "$app" in
+            daymica|password-vault|mail-box|water-tracker|eye-care)
+              base="$API/api/version"; hdr_name='X-Daymica-Release-Token'; token="$TOKEN_DEFAULT" ;;
+            yaoxiaobai)
+              base="$API/api/yaoxiaobai/version"; hdr_name='X-YaoXiaoBai-Release-Token'; token="$TOKEN_YAOXIAOBAI" ;;
+            *) echo "app failed publish allowlist" >&2; exit 1 ;;
+          esac
+          if [ -z "${token:-}" ]; then echo "::warning::staging release token missing for $app; skip publish"; exit 0; fi
+          echo "::add-mask::$token"
+          case "$PKG" in *.exe|*.EXE) ;; *) echo "::warning::windows package is not .exe; skip publish"; exit 0 ;; esac
+          VERSION="${VERSION_FULL%%+*}"
+          CODE="${VERSION_FULL##*+}"
+          [[ "$CODE" =~ ^[0-9]+$ ]] || { echo 'build number invalid' >&2; exit 1; }
+          [[ "$VERSION" =~ ^[A-Za-z0-9._-]+$ ]] || { echo 'version invalid' >&2; exit 1; }
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'sha invalid' >&2; exit 1; }
+          [ -f "$PKG" ] || { echo 'package missing' >&2; exit 1; }
+          name="$app-staging-$VERSION-$CODE.exe"
+          md5=$(md5sum "$PKG" | cut -d' ' -f1)
+          sha256=$(sha256sum "$PKG" | cut -d' ' -f1)
+          size=$(stat -c %s "$PKG")
+          body="$RUNNER_TEMP/publish-body.json"
+          hdr="$RUNNER_TEMP/publish-headers"
+          trap 'rm -f "$hdr" "$body"' EXIT
+          umask 077
+          printf '%s: %s\nX-App-ID: %s\n' "$hdr_name" "$token" "$app" > "$hdr"
+          code=$(curl -sS -o "$body" -w '%{http_code}' --max-time 600 \
+            -H @"$hdr" \
+            -F "file=@${PKG};filename=${name};type=application/octet-stream" \
+            -F platform=windows -F "version=$VERSION" -F "build_number=$CODE" \
+            -F artifact_type=exe -F "md5=$md5" -F "sha256=$sha256" \
+            "$base/upload-apk" 2>/dev/null || echo 000)
+          echo "upload-apk HTTP $code app=$app platform=windows size=$size"
+          [ "$code" = "200" ] || exit 1
+          url=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["data"]["url"])' "$body")
+          case "$url" in
+            /public/releases/$app/*) url="$API$url" ;;
+            "$API"/public/releases/$app/*) ;;
+            *) echo 'upload url failed allowlist' >&2; exit 1 ;;
+          esac
+          payload=$(python3 -c '
+          import json, sys
+          url, ver, code, size, md5, sha256, sha = sys.argv[1:]
+          print(json.dumps({"platform": "windows", "version": ver, "build_number": int(code),
+              "download_url": url, "artifact_type": "exe", "file_size": int(size),
+              "md5": md5, "sha256": sha256, "force_update": False,
+              "release_notes": "staging build " + sha[:7]}))
+          ' "$url" "$VERSION" "$CODE" "$size" "$md5" "$sha256" "$SHA")
+          code=$(curl -sS -o "$body" -w '%{http_code}' --max-time 60 -H @"$hdr" \
+            -H 'Content-Type: application/json' -d "$payload" "$base/add" 2>/dev/null || echo 000)
+          echo "version/add HTTP $code app=$app version=$VERSION build_number=$CODE"
+          case "$code" in 200|201) ;; *) exit 1 ;; esac
+          echo "staging published: $API/releases/$app/windows (build_number=$CODE)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload summary
         if: success() && contains(needs.guard.outputs.apps, format(',{0},', matrix.app))

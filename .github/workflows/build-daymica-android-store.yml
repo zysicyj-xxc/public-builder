@@ -87,9 +87,24 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
 

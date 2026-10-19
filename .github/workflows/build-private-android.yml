@@ -152,9 +152,24 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '21'
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
       - name: Cache shared Gradle
@@ -223,9 +238,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
       # 只 restore：与 daymica-android 并行时不要抢写同一份 Gradle 缓存。
@@ -302,9 +332,24 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
       - name: Cache shared Gradle
@@ -359,9 +404,24 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
       - name: Cache shared Gradle
@@ -415,9 +475,24 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
       - name: Cache shared Gradle
@@ -473,9 +548,24 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
       - name: Cache shared Gradle
@@ -537,9 +627,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
       # 只 restore：与 passwordvault-android 并行时不要抢写同一份 Gradle 缓存。
@@ -607,9 +712,24 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
       - name: Cache shared Gradle
@@ -665,9 +785,24 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
       - name: Cache shared Gradle
@@ -733,9 +868,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
       # 只 restore：与 yaoxiaobai 的侧载 APK job 并行时不要抢写同一份 Gradle 缓存。
@@ -812,9 +962,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
       # 只 restore：与 footprint 的侧载 APK job 并行时不要抢写同一份 Gradle 缓存。
@@ -891,9 +1056,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
       # 只 restore：与 mail-box 的侧载 APK job 并行时不要抢写同一份 Gradle 缓存。
@@ -970,9 +1150,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
       # 只 restore：与 admin-app 的侧载 APK job 并行时不要抢写同一份 Gradle 缓存。
@@ -1043,9 +1238,24 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
       - name: Cache shared Gradle
@@ -1107,9 +1317,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
       # 只 restore：与 watertracker-android 并行时不要抢写同一份 Gradle 缓存。

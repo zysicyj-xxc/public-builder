@@ -145,9 +145,24 @@ jobs:
           ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
           fetch-depth: 0
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
       # Flutter SDK + pub cache 由 subosito/flutter-action 的 cache: true 覆盖（实测命中），
@@ -192,9 +207,24 @@ jobs:
           ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
           fetch-depth: 0
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
       - name: Cache windows build + dart_tool
@@ -237,9 +267,24 @@ jobs:
           ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
           fetch-depth: 0
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
       - name: Cache windows build + dart_tool
@@ -282,9 +327,24 @@ jobs:
           ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
           fetch-depth: 0
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
       - name: Cache windows build + dart_tool
@@ -327,9 +387,24 @@ jobs:
           ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
           fetch-depth: 0
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
       - name: Ensure Inno Setup
@@ -385,9 +460,24 @@ jobs:
           ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
           fetch-depth: 0
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
       - name: Cache windows build + dart_tool
@@ -430,9 +520,24 @@ jobs:
           ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
           fetch-depth: 0
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
       - name: Ensure Inno Setup
@@ -488,9 +593,24 @@ jobs:
           ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
           fetch-depth: 0
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
       - name: Cache windows build + dart_tool
@@ -533,9 +653,24 @@ jobs:
           ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
           fetch-depth: 0
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
       - name: Ensure Inno Setup
@@ -591,9 +726,24 @@ jobs:
           ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
           fetch-depth: 0
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
       - name: Ensure Inno Setup
@@ -649,9 +799,24 @@ jobs:
           ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
           fetch-depth: 0
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
       - name: Ensure Inno Setup

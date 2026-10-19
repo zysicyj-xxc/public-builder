@@ -167,10 +167,26 @@ jobs:
           distribution: temurin
           java-version: ${{ matrix.java }}
 
+      - name: Read Flutter version
+        if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: stable
           cache: true
 
@@ -387,10 +403,26 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
+      - name: Read Flutter version
+        if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: stable
           cache: true
 

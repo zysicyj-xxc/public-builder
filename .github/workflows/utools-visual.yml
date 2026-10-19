@@ -8,7 +8,7 @@
 # export-diff regenerates canonical tokens (ADR 0006 export_web_tokens via the
 # flutter test, not bare dart run) and fails if generated/ or utools/ drifts.
 # gate (<plugin>) runs pnpm test, the command used by the private utools-test workflow.
-# Node 22, Flutter 3.44.8.
+# Node 22, Flutter version from the private repo .flutter-version.
 
 name: uTools Visual
 
@@ -126,9 +126,24 @@ jobs:
           ref: ${{ needs.meta.outputs.sha }}
           persist-credentials: false
           fetch-depth: 1
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
       - name: regenerate tokens and diff utools

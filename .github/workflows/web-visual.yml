@@ -9,7 +9,7 @@
 #   git diff --exit-code on the canonical outputs.
 # web-shared: pnpm test in apps/web_shared (root workspace if that is where the lockfile is).
 # website: pnpm test + pnpm run lint:visual (the pre-deploy gate).
-# Flutter 3.44.8, Node 22, same as the other public-builder workflows.
+# Flutter version from the private repo .flutter-version, Node 22, same as the other public-builder workflows.
 
 name: Web Visual
 
@@ -118,9 +118,24 @@ jobs:
           ref: ${{ needs.meta.outputs.sha }}
           persist-credentials: false
           fetch-depth: 1
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "ERROR: missing .flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
       - name: export tokens and diff

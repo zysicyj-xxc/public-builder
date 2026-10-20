@@ -145,16 +145,8 @@ def select_asserts(paths):
     layout = matching(paths, LAYOUT_PATH)
     domain = matching(paths, DOMAIN_PATH)
     if not layout:
-        names = sorted(p for p in paths if p.startswith("scripts/") and "/assert-" in f"/{p}" and p.endswith(".ps1"))
-        print("assert scripts found:")
-        for name in names:
-            print(name)
         fail("missing assert-scripts-layout.ps1")
     if not domain:
-        names = sorted(p for p in paths if p.startswith("scripts/") and p.endswith(".ps1") and "assert-" in p)
-        print("assert scripts found:")
-        for name in names:
-            print(name)
         fail("missing assert-domain-registry.ps1")
     return layout, domain
 
@@ -216,22 +208,20 @@ def run_pwsh(args, cwd, env, timeout):
 
 def emit_output(label, code, out, err):
     problem = output_problem(out) or output_problem(err)
+    dest = os.environ.get("DETAIL_LOG")
+    if dest:
+        with open(dest, "a", encoding="utf-8", errors="replace") as fh:
+            fh.write(f"\n== exit={code} ==\n")
+            if problem:
+                fh.write("suppressed\n")
+            else:
+                fh.write(out or "")
+                if err:
+                    fh.write("\n" + err)
     if problem:
-        print(f"{label} exit={code} output={problem}")
+        print("FAIL script suppressed")
         return problem
-    text = out + (("\n" + err) if err else "")
-    lines = text.splitlines()
-    clipped = False
-    if len(lines) > MAX_OUT_LINES:
-        lines = lines[:MAX_OUT_LINES]
-        clipped = True
-    shown = "\n".join(lines)
-    if len(shown) > MAX_OUT_CHARS:
-        shown = shown[:MAX_OUT_CHARS]
-        clipped = True
-    if shown:
-        print(shown)
-    print(f"{label} exit={code}" + (" output=truncated" if clipped else ""))
+    print(f"{'PASS' if code == 0 else 'FAIL'} script exit={code}")
 
 
 PESTER_BOOT = r"""
@@ -291,7 +281,7 @@ def record(rows, context, state, desc):
     if not CONTEXT_OK.fullmatch(context) or state not in ("success", "failure") or not DESC_OK.fullmatch(desc):
         fail("refusing to record a bad result row")
     rows.append((context, state, desc))
-    print(f"RESULT {context} {state} {desc}")
+    print(f"RESULT {state} {desc}")
 
 
 def cmd_from_tree(tree_file, output_file):
@@ -299,11 +289,18 @@ def cmd_from_tree(tree_file, output_file):
     paths = tree_paths(doc)
     layout, domain = select_asserts(paths)
     tests = select_tests(paths)
-    for path in layout + domain:
-        print(f"assert {path}")
-    for path in tests:
-        print(f"test {path}")
+    print(f"scripts-gate asserts={len(layout) + len(domain)} tests={len(tests)}")
     write_tests_output(output_file, tests)
+
+
+def cmd_contexts(tree_file, output_file):
+    doc = json.loads(Path(tree_file).read_text(encoding="utf-8"))
+    paths = tree_paths(doc)
+    _layout, _domain = select_asserts(paths)
+    tests = select_tests(paths)
+    contexts = [LAYOUT_CONTEXT] + tests
+    Path(output_file).write_text("\n".join(contexts) + "\n", encoding="utf-8")
+    print(f"contexts={len(contexts)}")
 
 
 def cmd_run():
@@ -327,11 +324,11 @@ def cmd_run():
     # Assert scripts are the gate, not the skippable matrix. Output filtering
     # still drops secret-shaped text before it reaches the log.
     for rel in layout + domain:
-        print(f"RUN {rel}")
+        print("RUN script")
         try:
             code, out, err = run_script(root, rel, False, env)
         except subprocess.TimeoutExpired:
-            print(f"RUN {rel} timeout")
+            print("FAIL script timeout")
             layout_state = "failure"
             continue
         if emit_output(rel, code, out, err):
@@ -361,14 +358,14 @@ def cmd_run():
             continue
         hit = item[1]
         if hit:
-            print(f"SKIP {rel} {hit}")
+            print(f"SKIP {hit}")
             record(rows, rel, "success", hit)
             continue
-        print(f"RUN {rel}")
+        print("RUN script")
         try:
             code, out, err = run_script(root, rel, item[2], env)
         except subprocess.TimeoutExpired:
-            print(f"RUN {rel} timeout")
+            print("FAIL script timeout")
             record(rows, rel, "failure", "failure")
             continue
         problem = emit_output(rel, code, out, err)
@@ -462,10 +459,13 @@ def main():
     if len(args) == 3 and args[0] == "--from-tree":
         cmd_from_tree(args[1], args[2])
         return
+    if len(args) == 3 and args[0] == "--contexts":
+        cmd_contexts(args[1], args[2])
+        return
     if args == ["--run"]:
         cmd_run()
         return
-    fail("usage: --selftest | --from-tree TREE OUTPUT | --run")
+    fail("usage: --selftest | --from-tree TREE OUTPUT | --contexts TREE OUTPUT | --run")
 
 
 if __name__ == "__main__":

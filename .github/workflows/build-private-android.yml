@@ -206,6 +206,19 @@ jobs:
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
         run: |
           $ErrorActionPreference = 'Stop'
+          foreach ($envItem in Get-ChildItem Env:) {
+            if ($envItem.Name -notmatch '(BASE64|_B64)$') { continue }
+            if ([string]::IsNullOrWhiteSpace($envItem.Value)) { continue }
+            $raw = ($envItem.Value -replace '\s','')
+            try { $bytes = [Convert]::FromBase64String($raw) } catch { continue }
+            $text = [Text.Encoding]::UTF8.GetString($bytes)
+            foreach ($line in ($text -split "\r?\n")) {
+              if ($line.Length -lt 8) { continue }
+              if ($line.Contains('::')) { continue }
+              $safe = $line.Replace('%','%25').Replace("`r",'%0D').Replace("`n",'%0A')
+              Write-Host "::add-mask::$safe"
+            }
+          }
           if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
           if ([string]::IsNullOrWhiteSpace($env:DAYMICA_ANDROID_KEYSTORE_BASE64)) { throw 'DAYMICA_ANDROID_KEYSTORE_BASE64 secret missing' }
           if ([string]::IsNullOrWhiteSpace($env:KEY_PASSWORD)) { throw 'KEY_PASSWORD secret missing' }
@@ -290,6 +303,19 @@ jobs:
           DAYMICA_RELEASE_TOKEN: ${{ secrets.DAYMICA_RELEASE_TOKEN }}
         run: |
           $ErrorActionPreference = 'Stop'
+          foreach ($envItem in Get-ChildItem Env:) {
+            if ($envItem.Name -notmatch '(BASE64|_B64)$') { continue }
+            if ([string]::IsNullOrWhiteSpace($envItem.Value)) { continue }
+            $raw = ($envItem.Value -replace '\s','')
+            try { $bytes = [Convert]::FromBase64String($raw) } catch { continue }
+            $text = [Text.Encoding]::UTF8.GetString($bytes)
+            foreach ($line in ($text -split "\r?\n")) {
+              if ($line.Length -lt 8) { continue }
+              if ($line.Contains('::')) { continue }
+              $safe = $line.Replace('%','%25').Replace("`r",'%0D').Replace("`n",'%0A')
+              Write-Host "::add-mask::$safe"
+            }
+          }
           if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
           if ([string]::IsNullOrWhiteSpace($env:DAYMICA_ANDROID_KEYSTORE_BASE64)) { throw 'DAYMICA_ANDROID_KEYSTORE_BASE64 secret missing' }
           if ([string]::IsNullOrWhiteSpace($env:KEY_PASSWORD)) { throw 'KEY_PASSWORD secret missing' }
@@ -305,14 +331,14 @@ jobs:
       - name: upload AAB artifact
         # 政策声明（照片/视频权限核心功能）未提交时 edits.commit 会 403，AAB 构建本身是好的。
         # 这里必须 always：把 AAB 留成产物，才能在 Play Console 手工建草稿把声明表单项逼出来。
-        # 手动上传请在 3 天内下载。
+        # 手动上传请在 1 天内下载。
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: daymica-play-aab-${{ needs.validate.outputs.daymica_version }}-${{ needs.validate.outputs.daymica_build }}
           path: apps/daymica/build/app/outputs/bundle/playRelease/app-play-release.aab
           if-no-files-found: ignore
-          retention-days: 3
+          retention-days: 1
 
   yaoxiaobai-android:
     name: yaoxiaobai-android-arm64
@@ -382,6 +408,19 @@ jobs:
           YAOXIAOBAI_STORE_PASSWORD: ${{ secrets.YAOXIAOBAI_STORE_PASSWORD }}
         run: |
           $ErrorActionPreference = 'Stop'
+          foreach ($envItem in Get-ChildItem Env:) {
+            if ($envItem.Name -notmatch '(BASE64|_B64)$') { continue }
+            if ([string]::IsNullOrWhiteSpace($envItem.Value)) { continue }
+            $raw = ($envItem.Value -replace '\s','')
+            try { $bytes = [Convert]::FromBase64String($raw) } catch { continue }
+            $text = [Text.Encoding]::UTF8.GetString($bytes)
+            foreach ($line in ($text -split "\r?\n")) {
+              if ($line.Length -lt 8) { continue }
+              if ($line.Contains('::')) { continue }
+              $safe = $line.Replace('%','%25').Replace("`r",'%0D').Replace("`n",'%0A')
+              Write-Host "::add-mask::$safe"
+            }
+          }
           if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
           & ./scripts/build-yaoxiaobai-android-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -453,6 +492,19 @@ jobs:
           FP_STORE_PASSWORD: ${{ secrets.FP_STORE_PASSWORD }}
         run: |
           $ErrorActionPreference = 'Stop'
+          foreach ($envItem in Get-ChildItem Env:) {
+            if ($envItem.Name -notmatch '(BASE64|_B64)$') { continue }
+            if ([string]::IsNullOrWhiteSpace($envItem.Value)) { continue }
+            $raw = ($envItem.Value -replace '\s','')
+            try { $bytes = [Convert]::FromBase64String($raw) } catch { continue }
+            $text = [Text.Encoding]::UTF8.GetString($bytes)
+            foreach ($line in ($text -split "\r?\n")) {
+              if ($line.Length -lt 8) { continue }
+              if ($line.Contains('::')) { continue }
+              $safe = $line.Replace('%','%25').Replace("`r",'%0D').Replace("`n",'%0A')
+              Write-Host "::add-mask::$safe"
+            }
+          }
           if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
           & ./scripts/build-footprint-android-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -526,6 +578,19 @@ jobs:
           AIUSAGE_STORE_PASSWORD: ${{ secrets.AIUSAGE_STORE_PASSWORD }}
         run: |
           $ErrorActionPreference = 'Stop'
+          foreach ($envItem in Get-ChildItem Env:) {
+            if ($envItem.Name -notmatch '(BASE64|_B64)$') { continue }
+            if ([string]::IsNullOrWhiteSpace($envItem.Value)) { continue }
+            $raw = ($envItem.Value -replace '\s','')
+            try { $bytes = [Convert]::FromBase64String($raw) } catch { continue }
+            $text = [Text.Encoding]::UTF8.GetString($bytes)
+            foreach ($line in ($text -split "\r?\n")) {
+              if ($line.Length -lt 8) { continue }
+              if ($line.Contains('::')) { continue }
+              $safe = $line.Replace('%','%25').Replace("`r",'%0D').Replace("`n",'%0A')
+              Write-Host "::add-mask::$safe"
+            }
+          }
           if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
           & ./scripts/build-aiusage-android-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -599,6 +664,19 @@ jobs:
           PASSWORDVAULT_STORE_PASSWORD: ${{ secrets.PASSWORDVAULT_STORE_PASSWORD }}
         run: |
           $ErrorActionPreference = 'Stop'
+          foreach ($envItem in Get-ChildItem Env:) {
+            if ($envItem.Name -notmatch '(BASE64|_B64)$') { continue }
+            if ([string]::IsNullOrWhiteSpace($envItem.Value)) { continue }
+            $raw = ($envItem.Value -replace '\s','')
+            try { $bytes = [Convert]::FromBase64String($raw) } catch { continue }
+            $text = [Text.Encoding]::UTF8.GetString($bytes)
+            foreach ($line in ($text -split "\r?\n")) {
+              if ($line.Length -lt 8) { continue }
+              if ($line.Contains('::')) { continue }
+              $safe = $line.Replace('%','%25').Replace("`r",'%0D').Replace("`n",'%0A')
+              Write-Host "::add-mask::$safe"
+            }
+          }
           if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
           & ./scripts/build-passwordvault-android-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -675,6 +753,19 @@ jobs:
           PLAY_SERVICE_ACCOUNT_JSON_B64: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON_B64 }}
         run: |
           $ErrorActionPreference = 'Stop'
+          foreach ($envItem in Get-ChildItem Env:) {
+            if ($envItem.Name -notmatch '(BASE64|_B64)$') { continue }
+            if ([string]::IsNullOrWhiteSpace($envItem.Value)) { continue }
+            $raw = ($envItem.Value -replace '\s','')
+            try { $bytes = [Convert]::FromBase64String($raw) } catch { continue }
+            $text = [Text.Encoding]::UTF8.GetString($bytes)
+            foreach ($line in ($text -split "\r?\n")) {
+              if ($line.Length -lt 8) { continue }
+              if ($line.Contains('::')) { continue }
+              $safe = $line.Replace('%','%25').Replace("`r",'%0D').Replace("`n",'%0A')
+              Write-Host "::add-mask::$safe"
+            }
+          }
           if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
           & ./scripts/ci-passwordvault-android-play-prod.ps1 `
             -Version $env:APP_VERSION `
@@ -685,14 +776,14 @@ jobs:
       - name: upload AAB artifact
         # 政策声明未提交时 edits.commit 403，AAB 构建本身是好的。
         # 必须 always：把 AAB 留成产物，才能在 Play Console 手工建草稿把声明表单项逼出来。
-        # 手动上传请在 3 天内下载。
+        # 手动上传请在 1 天内下载。
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: passwordvault-play-aab-${{ needs.validate.outputs.newapp_version }}-${{ needs.validate.outputs.newapp_build }}
           path: apps/password-vault/build/app/outputs/bundle/release/app-release.aab
           if-no-files-found: ignore
-          retention-days: 3
+          retention-days: 1
 
   mailbox-android:
     name: mailbox-android-arm64
@@ -763,6 +854,19 @@ jobs:
           MAILBOX_STORE_PASSWORD: ${{ secrets.MAILBOX_STORE_PASSWORD }}
         run: |
           $ErrorActionPreference = 'Stop'
+          foreach ($envItem in Get-ChildItem Env:) {
+            if ($envItem.Name -notmatch '(BASE64|_B64)$') { continue }
+            if ([string]::IsNullOrWhiteSpace($envItem.Value)) { continue }
+            $raw = ($envItem.Value -replace '\s','')
+            try { $bytes = [Convert]::FromBase64String($raw) } catch { continue }
+            $text = [Text.Encoding]::UTF8.GetString($bytes)
+            foreach ($line in ($text -split "\r?\n")) {
+              if ($line.Length -lt 8) { continue }
+              if ($line.Contains('::')) { continue }
+              $safe = $line.Replace('%','%25').Replace("`r",'%0D').Replace("`n",'%0A')
+              Write-Host "::add-mask::$safe"
+            }
+          }
           if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
           & ./scripts/build-mailbox-android-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -836,6 +940,19 @@ jobs:
           ADMINAPP_STORE_PASSWORD: ${{ secrets.ADMINAPP_STORE_PASSWORD }}
         run: |
           $ErrorActionPreference = 'Stop'
+          foreach ($envItem in Get-ChildItem Env:) {
+            if ($envItem.Name -notmatch '(BASE64|_B64)$') { continue }
+            if ([string]::IsNullOrWhiteSpace($envItem.Value)) { continue }
+            $raw = ($envItem.Value -replace '\s','')
+            try { $bytes = [Convert]::FromBase64String($raw) } catch { continue }
+            $text = [Text.Encoding]::UTF8.GetString($bytes)
+            foreach ($line in ($text -split "\r?\n")) {
+              if ($line.Length -lt 8) { continue }
+              if ($line.Contains('::')) { continue }
+              $safe = $line.Replace('%','%25').Replace("`r",'%0D').Replace("`n",'%0A')
+              Write-Host "::add-mask::$safe"
+            }
+          }
           if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
           & ./scripts/build-adminapp-android-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -919,6 +1036,19 @@ jobs:
           PLAY_SERVICE_ACCOUNT_JSON_B64: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON_B64 }}
         run: |
           $ErrorActionPreference = 'Stop'
+          foreach ($envItem in Get-ChildItem Env:) {
+            if ($envItem.Name -notmatch '(BASE64|_B64)$') { continue }
+            if ([string]::IsNullOrWhiteSpace($envItem.Value)) { continue }
+            $raw = ($envItem.Value -replace '\s','')
+            try { $bytes = [Convert]::FromBase64String($raw) } catch { continue }
+            $text = [Text.Encoding]::UTF8.GetString($bytes)
+            foreach ($line in ($text -split "\r?\n")) {
+              if ($line.Length -lt 8) { continue }
+              if ($line.Contains('::')) { continue }
+              $safe = $line.Replace('%','%25').Replace("`r",'%0D').Replace("`n",'%0A')
+              Write-Host "::add-mask::$safe"
+            }
+          }
           if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
           & ./scripts/ci-yaoxiaobai-android-play-prod.ps1 `
             -Version $env:APP_VERSION `
@@ -929,14 +1059,14 @@ jobs:
       - name: upload AAB artifact
         # 政策声明未提交时 edits.commit 403，AAB 构建本身是好的。
         # 必须 always：把 AAB 留成产物，才能在 Play Console 手工建草稿把声明表单项逼出来。
-        # 手动上传请在 3 天内下载。
+        # 手动上传请在 1 天内下载。
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: yaoxiaobai-play-aab-${{ needs.validate.outputs.yaoxiaobai_version }}-${{ needs.validate.outputs.yaoxiaobai_build }}
           path: apps/yaoxiaobai/yaoxiaobai_app/build/app/outputs/bundle/release/app-release.aab
           if-no-files-found: ignore
-          retention-days: 3
+          retention-days: 1
 
   footprint-play:
     name: footprint-play-aab
@@ -1013,6 +1143,19 @@ jobs:
           PLAY_SERVICE_ACCOUNT_JSON_B64: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON_B64 }}
         run: |
           $ErrorActionPreference = 'Stop'
+          foreach ($envItem in Get-ChildItem Env:) {
+            if ($envItem.Name -notmatch '(BASE64|_B64)$') { continue }
+            if ([string]::IsNullOrWhiteSpace($envItem.Value)) { continue }
+            $raw = ($envItem.Value -replace '\s','')
+            try { $bytes = [Convert]::FromBase64String($raw) } catch { continue }
+            $text = [Text.Encoding]::UTF8.GetString($bytes)
+            foreach ($line in ($text -split "\r?\n")) {
+              if ($line.Length -lt 8) { continue }
+              if ($line.Contains('::')) { continue }
+              $safe = $line.Replace('%','%25').Replace("`r",'%0D').Replace("`n",'%0A')
+              Write-Host "::add-mask::$safe"
+            }
+          }
           if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
           & ./scripts/ci-footprint-android-play-prod.ps1 `
             -Version $env:APP_VERSION `
@@ -1023,14 +1166,14 @@ jobs:
       - name: upload AAB artifact
         # 政策声明未提交时 edits.commit 403，AAB 构建本身是好的。
         # 必须 always：把 AAB 留成产物，才能在 Play Console 手工建草稿把声明表单项逼出来。
-        # 手动上传请在 3 天内下载。
+        # 手动上传请在 1 天内下载。
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: footprint-play-aab-${{ needs.validate.outputs.footprint_version }}-${{ needs.validate.outputs.footprint_build }}
           path: apps/footprint/build/app/outputs/bundle/release/app-release.aab
           if-no-files-found: ignore
-          retention-days: 3
+          retention-days: 1
 
   mailbox-play:
     name: mailbox-play-aab
@@ -1107,6 +1250,19 @@ jobs:
           PLAY_SERVICE_ACCOUNT_JSON_B64: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON_B64 }}
         run: |
           $ErrorActionPreference = 'Stop'
+          foreach ($envItem in Get-ChildItem Env:) {
+            if ($envItem.Name -notmatch '(BASE64|_B64)$') { continue }
+            if ([string]::IsNullOrWhiteSpace($envItem.Value)) { continue }
+            $raw = ($envItem.Value -replace '\s','')
+            try { $bytes = [Convert]::FromBase64String($raw) } catch { continue }
+            $text = [Text.Encoding]::UTF8.GetString($bytes)
+            foreach ($line in ($text -split "\r?\n")) {
+              if ($line.Length -lt 8) { continue }
+              if ($line.Contains('::')) { continue }
+              $safe = $line.Replace('%','%25').Replace("`r",'%0D').Replace("`n",'%0A')
+              Write-Host "::add-mask::$safe"
+            }
+          }
           if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
           & ./scripts/ci-mailbox-android-play-prod.ps1 `
             -Version $env:APP_VERSION `
@@ -1117,14 +1273,14 @@ jobs:
       - name: upload AAB artifact
         # 政策声明未提交时 edits.commit 403，AAB 构建本身是好的。
         # 必须 always：把 AAB 留成产物，才能在 Play Console 手工建草稿把声明表单项逼出来。
-        # 手动上传请在 3 天内下载。
+        # 手动上传请在 1 天内下载。
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: mailbox-play-aab-${{ needs.validate.outputs.newapp_version }}-${{ needs.validate.outputs.newapp_build }}
           path: apps/mail-box/build/app/outputs/bundle/release/app-release.aab
           if-no-files-found: ignore
-          retention-days: 3
+          retention-days: 1
 
   adminapp-play:
     name: adminapp-play-aab
@@ -1201,6 +1357,19 @@ jobs:
           PLAY_SERVICE_ACCOUNT_JSON_B64: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON_B64 }}
         run: |
           $ErrorActionPreference = 'Stop'
+          foreach ($envItem in Get-ChildItem Env:) {
+            if ($envItem.Name -notmatch '(BASE64|_B64)$') { continue }
+            if ([string]::IsNullOrWhiteSpace($envItem.Value)) { continue }
+            $raw = ($envItem.Value -replace '\s','')
+            try { $bytes = [Convert]::FromBase64String($raw) } catch { continue }
+            $text = [Text.Encoding]::UTF8.GetString($bytes)
+            foreach ($line in ($text -split "\r?\n")) {
+              if ($line.Length -lt 8) { continue }
+              if ($line.Contains('::')) { continue }
+              $safe = $line.Replace('%','%25').Replace("`r",'%0D').Replace("`n",'%0A')
+              Write-Host "::add-mask::$safe"
+            }
+          }
           if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
           & ./scripts/ci-adminapp-android-play-prod.ps1 `
             -Version $env:APP_VERSION `
@@ -1211,14 +1380,14 @@ jobs:
       - name: upload AAB artifact
         # 政策声明未提交时 edits.commit 403，AAB 构建本身是好的。
         # 必须 always：把 AAB 留成产物，才能在 Play Console 手工建草稿把声明表单项逼出来。
-        # 手动上传请在 3 天内下载。
+        # 手动上传请在 1 天内下载。
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: adminapp-play-aab-${{ needs.validate.outputs.newapp_version }}-${{ needs.validate.outputs.newapp_build }}
           path: apps/admin-app/build/app/outputs/bundle/release/app-release.aab
           if-no-files-found: ignore
-          retention-days: 3
+          retention-days: 1
 
   watertracker-android:
     name: watertracker-android-arm64
@@ -1289,6 +1458,19 @@ jobs:
           WATERTRACKER_STORE_PASSWORD: ${{ secrets.WATERTRACKER_STORE_PASSWORD }}
         run: |
           $ErrorActionPreference = 'Stop'
+          foreach ($envItem in Get-ChildItem Env:) {
+            if ($envItem.Name -notmatch '(BASE64|_B64)$') { continue }
+            if ([string]::IsNullOrWhiteSpace($envItem.Value)) { continue }
+            $raw = ($envItem.Value -replace '\s','')
+            try { $bytes = [Convert]::FromBase64String($raw) } catch { continue }
+            $text = [Text.Encoding]::UTF8.GetString($bytes)
+            foreach ($line in ($text -split "\r?\n")) {
+              if ($line.Length -lt 8) { continue }
+              if ($line.Contains('::')) { continue }
+              $safe = $line.Replace('%','%25').Replace("`r",'%0D').Replace("`n",'%0A')
+              Write-Host "::add-mask::$safe"
+            }
+          }
           if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
           & ./scripts/build-watertracker-android-prod.ps1 -Version $env:APP_VERSION -BuildNumber ([int]$env:APP_BUILD)
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -1368,6 +1550,19 @@ jobs:
           PLAY_SERVICE_ACCOUNT_JSON_B64: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON_B64 }}
         run: |
           $ErrorActionPreference = 'Stop'
+          foreach ($envItem in Get-ChildItem Env:) {
+            if ($envItem.Name -notmatch '(BASE64|_B64)$') { continue }
+            if ([string]::IsNullOrWhiteSpace($envItem.Value)) { continue }
+            $raw = ($envItem.Value -replace '\s','')
+            try { $bytes = [Convert]::FromBase64String($raw) } catch { continue }
+            $text = [Text.Encoding]::UTF8.GetString($bytes)
+            foreach ($line in ($text -split "\r?\n")) {
+              if ($line.Length -lt 8) { continue }
+              if ($line.Contains('::')) { continue }
+              $safe = $line.Replace('%','%25').Replace("`r",'%0D').Replace("`n",'%0A')
+              Write-Host "::add-mask::$safe"
+            }
+          }
           if ($env:APP_BUILD -notmatch '^[0-9]{1,16}$') { throw 'invalid APP_BUILD' }
           & ./scripts/ci-watertracker-android-play-prod.ps1 `
             -Version $env:APP_VERSION `
@@ -1378,14 +1573,14 @@ jobs:
       - name: upload AAB artifact
         # 政策声明未提交时 edits.commit 403，AAB 构建本身是好的。
         # 必须 always：把 AAB 留成产物，才能在 Play Console 手工建草稿把声明表单项逼出来。
-        # 手动上传请在 3 天内下载。
+        # 手动上传请在 1 天内下载。
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: watertracker-play-aab-${{ needs.validate.outputs.newapp_version }}-${{ needs.validate.outputs.newapp_build }}
           path: apps/water-tracker/build/app/outputs/bundle/release/app-release.aab
           if-no-files-found: ignore
-          retention-days: 3
+          retention-days: 1
 
   release:
     name: create-github-release

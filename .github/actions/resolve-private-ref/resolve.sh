@@ -26,12 +26,12 @@ normalize_ref() {
   local full="$raw"
   if ! printf '%s' "$full" | grep -Eq '^refs/'; then
     if ! printf '%s' "$full" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/-]*$'; then
-      fail "ref failed allowlist: $full"
+      fail "ref failed allowlist"
     fi
     full="refs/heads/$full"
   fi
   case "$full" in
-    *..*) fail "ref failed allowlist: $full" ;;
+    *..*) fail "ref failed allowlist" ;;
   esac
   if printf '%s' "$full" | grep -Eq '^refs/pull/[0-9]+/(head|merge)$'; then
     printf '%s' "$full"
@@ -43,18 +43,18 @@ normalize_ref() {
   elif printf '%s' "$full" | grep -Eq '^refs/tags/.+'; then
     rest=${full#refs/tags/}
   else
-    fail "ref failed allowlist: $full"
+    fail "ref failed allowlist"
   fi
   local -a segs=()
   IFS='/' read -r -a segs <<< "$rest"
   local joined s
   joined=$(IFS=/; printf '%s' "${segs[*]}")
   if [ "$joined" != "$rest" ] || [ "${#segs[@]}" -eq 0 ]; then
-    fail "ref failed allowlist: $full"
+    fail "ref failed allowlist"
   fi
   for s in "${segs[@]}"; do
     if ! printf '%s' "$s" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'; then
-      fail "ref failed allowlist: $full"
+      fail "ref failed allowlist"
     fi
   done
   printf '%s' "$full"
@@ -160,4 +160,4 @@ fi
   echo "ref=${REF_NORM:-$SHA}"
   echo "sha=$SHA"
 } >> "$GITHUB_OUTPUT"
-echo "OK ref=${REF_NORM:-} sha=$SHA"
+echo "OK sha=$SHA"

@@ -29,6 +29,11 @@ on:
         description: 'Commit SHA for checkout and status (default: resolve ref)'
         required: false
         type: string
+      force:
+        description: 'false does not move an existing success or failure status back to pending.'
+        required: false
+        default: 'true'
+        type: string
 
 permissions:
   contents: read
@@ -84,6 +89,7 @@ jobs:
         env:
           SHA: ${{ steps.resolve.outputs.sha }}
           TESTS_JSON: ${{ steps.list.outputs.tests }}
+          FORCE: ${{ github.event.inputs.force || 'true' }}
           GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -92,11 +98,22 @@ jobs:
             echo "ERROR: sha failed allowlist" >&2
             exit 1
           fi
+          states=$(mktemp)
+          gh api --paginate "repos/zysicyj-xxc/zysicyj/commits/${SHA}/statuses?per_page=100" \
+            --jq '.[] | [.context, .state] | @tsv' >"$states.raw" || true
+          awk -F '\t' 'NF>=2 && !seen[$1]++ { print $1 "\t" $2 }' "$states.raw" >"$states"
+          rm -f "$states.raw"
           post() {
+            if [ "$FORCE" = "false" ]; then
+              st=$(awk -F '\t' -v c="$1" '$1==c { print $2; exit }' "$states")
+              case "$st" in
+                success|failure|error) return 0 ;;
+              esac
+            fi
             gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
               -f state="pending" \
               -f target_url="${RUN_URL}" \
-              -f description="running on public-builder" \
+              -f description="running" \
               -f context="$1" >/dev/null
           }
           post "layout + domain gates"
@@ -150,7 +167,6 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-      actions: write
     steps:
       - name: Checkout public-builder
         uses: actions/checkout@v4
@@ -182,14 +198,46 @@ jobs:
         env:
           TESTS_JSON: ${{ needs.meta.outputs.tests }}
           RESULTS_PATH: ${{ runner.temp }}/results.tsv
+          DETAIL_LOG: ${{ runner.temp }}/scripts-detail.log
+          GATE_LOG_KEY: ${{ secrets.GATE_LOG_KEY }}
         run: python3 "$GITHUB_WORKSPACE/runner/.github/scripts/scripts_gate_run.py" --run
+
+      - name: Encrypt detail log
+        if: failure()
+        env:
+          GATE_LOG_KEY: ${{ secrets.GATE_LOG_KEY }}
+          DETAIL_LOG: ${{ runner.temp }}/scripts-detail.log
+        run: |
+          set -euo pipefail
+          if [ -z "${GATE_LOG_KEY:-}" ] || [ ! -s "${DETAIL_LOG}" ]; then
+            rm -f "${DETAIL_LOG}"
+            echo "SKIP encrypt"
+            exit 0
+          fi
+          mkdir -p "${RUNNER_TEMP}/gate-encrypted"
+          openssl enc -aes-256-cbc -pbkdf2 -iter 100000 -salt \
+            -pass env:GATE_LOG_KEY \
+            -in "${DETAIL_LOG}" \
+            -out "${RUNNER_TEMP}/gate-encrypted/scripts.bin"
+          rm -f "${DETAIL_LOG}"
+          echo "PASS encrypt"
+
+      - name: Upload encrypted log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-log-${{ github.run_id }}-scripts
+          path: ${{ runner.temp }}/gate-encrypted
+          retention-days: 1
+          if-no-files-found: ignore
 
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scripts-gate-results
+          name: scripts-gate-results-${{ github.run_id }}
           path: ${{ runner.temp }}/results.tsv
+          retention-days: 1
           if-no-files-found: warn
 
   report:
@@ -204,7 +252,7 @@ jobs:
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
-          name: scripts-gate-results
+          name: scripts-gate-results-${{ github.run_id }}
           path: gate-results
 
       - name: Post conclusions
@@ -242,7 +290,7 @@ jobs:
           fi
           post() {
             local ctx="$1" state="$2" desc="$3"
-            echo "status ${ctx} ${state} ${desc}"
+            echo "status ${state} ${desc}"
             gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
               -f state="$state" \
               -f target_url="${RUN_URL}" \
@@ -267,3 +315,24 @@ jobs:
             fi
             post_one "$ctx"
           done
+
+  purge-logs:
+    name: schedule-log-purge
+    needs: [meta, report]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Request log purge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          DISPATCH_REF: ${{ github.ref_name }}
+        run: bash .github/scripts/request-purge.sh || echo "FAIL purge-request"

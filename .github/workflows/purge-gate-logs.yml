@@ -1,0 +1,56 @@
+# Delete logs of completed gate runs. A gate run dispatches this workflow
+# with its own run id; the 5-minute schedule sweeps anything left behind.
+# Job-level actions: write is what DELETE /actions/runs/{id}/logs needs.
+# The organization read-only default does not remove a permission declared here.
+# dry_run calls GET /repos/{owner}/{repo}/actions/runs?per_page=1 and counts
+# runs without deleting, so a merge can check the token before any delete.
+
+name: Purge Gate Logs
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'One completed run id. Empty sweeps completed gate runs.'
+        required: false
+        default: ''
+        type: string
+      dry_run:
+        description: 'Check the actions permission and count runs. Do not delete.'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: purge-gate-logs-${{ github.event.inputs.run_id || 'sweep' }}-${{ github.event.inputs.dry_run || 'delete' }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  purge:
+    name: purge
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Delete gate logs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.inputs.run_id }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: bash .github/scripts/purge-gate-logs.sh

@@ -107,9 +107,9 @@ jobs:
               exit 1
             fi
             printf 'golden: %s\n' "${files[@]}"
-            flutter test --update-goldens "${files[@]}" >"$update_log" 2>&1 || test_rc=$?
+            flutter test --concurrency=2 --update-goldens "${files[@]}" >"$update_log" 2>&1 || test_rc=$?
             if [ "$test_rc" -eq 0 ]; then
-              flutter test "${files[@]}" >"$verify_log" 2>&1 || verify_rc=$?
+              flutter test --concurrency=2 "${files[@]}" >"$verify_log" 2>&1 || verify_rc=$?
             else
               verify_rc=1
             fi

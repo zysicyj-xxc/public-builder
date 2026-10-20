@@ -26,6 +26,11 @@ on:
         description: 'Commit SHA for checkout and status (default: resolve ref)'
         required: false
         type: string
+      scopes:
+        description: 'Comma list: tokens,web-shared,website. Empty runs all.'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -46,6 +51,7 @@ jobs:
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
       ref: ${{ steps.resolve.outputs.ref }}
+      scopes: ${{ steps.pick.outputs.scopes }}
     steps:
       - name: Checkout public-builder
         uses: actions/checkout@v4
@@ -58,27 +64,58 @@ jobs:
           sha: ${{ github.event.client_payload.sha || github.event.inputs.sha }}
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
 
+      - name: Pick scopes
+        id: pick
+        env:
+          RAW: ${{ github.event.client_payload.scopes || github.event.inputs.scopes }}
+        run: |
+          set -euo pipefail
+          python3 - "$RAW" <<'PY'
+          import os, sys
+          order = ["tokens", "web-shared", "website"]
+          raw = (sys.argv[1] or "").replace(" ", "")
+          if raw == "":
+              scopes = order
+          else:
+              scopes = []
+              for part in raw.split(","):
+                  if not part:
+                      continue
+                  if part not in order:
+                      sys.exit("FAIL scopes")
+                  if part not in scopes:
+                      scopes.append(part)
+              if not scopes:
+                  sys.exit("FAIL scopes")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write("scopes= " + " ".join(scopes) + " \n")
+          print("PASS scopes count=" + str(len(scopes)))
+          PY
+
       - name: Set pending statuses
         env:
           SHA: ${{ steps.resolve.outputs.sha }}
+          SCOPES: ${{ steps.pick.outputs.scopes }}
           GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
-            echo "ERROR: sha failed allowlist" >&2
+            echo "FAIL sha" >&2
             exit 1
           fi
-          post() {
+          for scope in ${SCOPES}; do
+            case "$scope" in
+              tokens|web-shared|website) ;;
+              *) echo "FAIL scopes" >&2; exit 1 ;;
+            esac
             gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
               -f state="pending" \
               -f target_url="${RUN_URL}" \
-              -f description="running on public-builder" \
-              -f context="$1" >/dev/null
-          }
-          post "tokens"
-          post "web-shared"
-          post "website"
+              -f description="running" \
+              -f context="$scope" >/dev/null
+          done
+          echo "PASS pending"
 
       - name: Post failure when resolve fails
         if: failure()
@@ -108,6 +145,7 @@ jobs:
   tokens:
     name: tokens
     needs: meta
+    if: contains(needs.meta.outputs.scopes, ' tokens ')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -138,20 +176,43 @@ jobs:
           flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
+      - uses: actions/checkout@v4
+        with:
+          path: _pb
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-tokens-${{ hashFiles('apps/shared_package/pubspec.lock') }}
+          restore-keys: |
+            pub-${{ runner.os }}-tokens-
       - name: export tokens and diff
-        run: |
-          set -euo pipefail
-          cd apps/shared_package
-          flutter pub get
-          flutter test test/tokens/web_token_export_test.dart
-          cd ../..
-          git diff --exit-code -- \
-            apps/shared_package/generated \
-            backend/internal/handler/oauth_tokens.css
+        env:
+          GATE_LOG_KEY: ${{ secrets.GATE_LOG_KEY }}
+          QUIET_LABEL: tokens
+          QUIET_KIND: generic
+          QUIET_CMD: |
+            set -euo pipefail
+            cd apps/shared_package
+            flutter pub get
+            flutter test --concurrency=2 --reporter json test/tokens/web_token_export_test.dart
+            cd ../..
+            git diff --exit-code -- apps/shared_package/generated backend/internal/handler/oauth_tokens.css
+        run: bash "$GITHUB_WORKSPACE/_pb/.github/scripts/quiet.sh"
+      - name: Upload encrypted log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-log-${{ github.run_id }}-tokens
+          path: ${{ runner.temp }}/gate-encrypted
+          retention-days: 1
+          if-no-files-found: ignore
 
   web-shared:
     name: web-shared
     needs: meta
+    if: contains(needs.meta.outputs.scopes, ' web-shared ')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -165,29 +226,44 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: test @zysicyj/web-shared
-        run: |
-          set -euo pipefail
-          if [ ! -f apps/web_shared/package.json ]; then
-            echo "ERROR: missing apps/web_shared/package.json" >&2
-            exit 1
-          fi
-          corepack enable
-          if [ -f apps/web_shared/pnpm-lock.yaml ]; then
-            cd apps/web_shared
-            pnpm install --frozen-lockfile
-            pnpm test
-          elif [ -f pnpm-lock.yaml ]; then
-            pnpm install --frozen-lockfile
-            pnpm --dir apps/web_shared test
-          else
-            echo "ERROR: no pnpm-lock.yaml for apps/web_shared" >&2
-            exit 1
-          fi
+      - uses: actions/checkout@v4
+        with:
+          path: _pb
+          persist-credentials: false
+          fetch-depth: 1
+      - name: test web-shared
+        env:
+          GATE_LOG_KEY: ${{ secrets.GATE_LOG_KEY }}
+          QUIET_LABEL: web-shared
+          QUIET_KIND: generic
+          QUIET_CMD: |
+            set -euo pipefail
+            test -f apps/web_shared/package.json
+            corepack enable
+            if [ -f apps/web_shared/pnpm-lock.yaml ]; then
+              cd apps/web_shared
+              pnpm install --frozen-lockfile
+              pnpm test
+            elif [ -f pnpm-lock.yaml ]; then
+              pnpm install --frozen-lockfile
+              pnpm --dir apps/web_shared test
+            else
+              exit 1
+            fi
+        run: bash "$GITHUB_WORKSPACE/_pb/.github/scripts/quiet.sh"
+      - name: Upload encrypted log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-log-${{ github.run_id }}-web-shared
+          path: ${{ runner.temp }}/gate-encrypted
+          retention-days: 1
+          if-no-files-found: ignore
 
   website:
     name: website
     needs: meta
+    if: contains(needs.meta.outputs.scopes, ' website ')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -201,19 +277,34 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - uses: actions/checkout@v4
+        with:
+          path: _pb
+          persist-credentials: false
+          fetch-depth: 1
       - name: test and lint:visual
-        run: |
-          set -euo pipefail
-          cd website
-          if [ ! -f pnpm-lock.yaml ]; then
-            echo "ERROR: missing website/pnpm-lock.yaml" >&2
-            exit 1
-          fi
-          corepack enable
-          pnpm install --frozen-lockfile
-          node -e 'const s=require("./package.json").scripts||{}; if(!s["lint:visual"]) { console.error("missing lint:visual"); process.exit(1); }'
-          pnpm test
-          pnpm run lint:visual
+        env:
+          GATE_LOG_KEY: ${{ secrets.GATE_LOG_KEY }}
+          QUIET_LABEL: website
+          QUIET_KIND: generic
+          QUIET_CMD: |
+            set -euo pipefail
+            cd website
+            test -f pnpm-lock.yaml
+            corepack enable
+            pnpm install --frozen-lockfile
+            node -e 'const s=require("./package.json").scripts||{}; if(!s["lint:visual"]) process.exit(1)'
+            pnpm test
+            pnpm run lint:visual
+        run: bash "$GITHUB_WORKSPACE/_pb/.github/scripts/quiet.sh"
+      - name: Upload encrypted log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-log-${{ github.run_id }}-website-visual
+          path: ${{ runner.temp }}/gate-encrypted
+          retention-days: 1
+          if-no-files-found: ignore
 
   report:
     name: post-statuses
@@ -238,12 +329,15 @@ jobs:
           fi
           post() {
             local ctx="$1" result="$2" state desc
+            if [ "$result" = "skipped" ]; then
+              return 0
+            fi
             case "$result" in
               success) state=success; desc=success ;;
               cancelled) state=failure; desc=cancelled ;;
               *) state=failure; desc=failure ;;
             esac
-            echo "status ${ctx} ${state}"
+            echo "status ${state}"
             gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
               -f state="$state" \
               -f target_url="${RUN_URL}" \
@@ -253,3 +347,24 @@ jobs:
           post tokens "$TOKENS"
           post web-shared "$WEB_SHARED"
           post website "$WEBSITE"
+
+  purge-logs:
+    name: schedule-log-purge
+    needs: [meta, report]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Request log purge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          DISPATCH_REF: ${{ github.ref_name }}
+        run: bash .github/scripts/request-purge.sh || echo "FAIL purge-request"

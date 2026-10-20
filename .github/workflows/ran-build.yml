@@ -8,6 +8,7 @@
 #   - 不把源码 / 构建日志全文打到控制台：typecheck 只打 "error TS" 行，单测只打汇总与失败用例名，
 #     Cocos 构建只打退出码、用时和 " - error:" 行（截断）；完整日志进 ran-ci-logs artifact。
 #   - 注意：artifact 在公开仓对任何登录 GitHub 的用户可下载（含编译后的游戏代码），保留 7 天。
+#     所以 wechatgame / web-mobile 都强制 release 构建（debug=false、sourceMaps=false，覆盖仓内 build-config）。
 #
 # 触发：
 #   gh api repos/zysicyj-xxc/public-builder/dispatches -f event_type=ran-build \
@@ -223,7 +224,14 @@ jobs:
           $failed = @()
           foreach ($name in @('wechatgame', 'web-mobile')) {
             if (-not $env:TARGETS.Contains(",$name,")) { continue }
-            $cfg = (Resolve-Path "build-config/$name.json").Path
+            if (-not (Test-Path "build-config/$name.json")) { throw "build-config/$name.json not found in ran@ref" }
+            # 公开仓：一律 release（debug=false，压缩混淆）构建，减少 artifact 里可读的代码
+            $conf = Get-Content "build-config/$name.json" -Raw -Encoding UTF8 | ConvertFrom-Json
+            $conf | Add-Member -NotePropertyName debug -NotePropertyValue $false -Force
+            $conf | Add-Member -NotePropertyName sourceMaps -NotePropertyValue $false -Force
+            $cfg = Join-Path $env:RUNNER_TEMP "ran-build-$name.json"
+            $conf | ConvertTo-Json -Depth 20 | Out-File -FilePath $cfg -Encoding utf8NoBOM
+            Write-Host "[$name] release build (debug=false, sourceMaps=false)"
             $log = "$project\ci-logs\build-$name.log"
             $argLine = "--project `"$project`" --build `"configPath=$cfg;logDest=$log`""
             $sw = [Diagnostics.Stopwatch]::StartNew()

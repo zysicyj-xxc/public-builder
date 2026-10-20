@@ -2,7 +2,8 @@
 # matching public-builder gate when its commit status is missing.
 # Trust boundary: schedule and workflow_dispatch only. No pull_request.
 # PRIVATE_REPO_ACCESS_TOKEN reads the private repo and writes statuses.
-# github.token (actions: write) dispatches workflows in this repo.
+# The poll job and the purge job declare actions: write themselves.
+# The org default can stay read-only; it does not cap this key.
 
 name: Poll Private Gates
 
@@ -19,7 +20,6 @@ on:
 
 permissions:
   contents: read
-  actions: write
 
 concurrency:
   group: poll-private-gates
@@ -34,6 +34,9 @@ jobs:
     name: poll
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      actions: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -58,6 +61,9 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:

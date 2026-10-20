@@ -29,7 +29,6 @@ on:
 
 permissions:
   contents: read
-  actions: read
 
 concurrency:
   group: flutter-test-${{ github.event.client_payload.sha || github.event.inputs.sha || github.event.client_payload.ref || github.event.inputs.ref }}-${{ github.event.inputs.only || github.event.client_payload.only || 'all' }}
@@ -201,6 +200,8 @@ jobs:
     if: always() && needs.meta.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      actions: read
     steps:
       - name: Post conclusions
         env:

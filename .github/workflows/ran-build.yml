@@ -1,0 +1,372 @@
+# 《染》(zysicyj-xxc/ran) 微信小游戏：单测 + Cocos Creator 3.8.6 命令行构建 + web 冒烟。
+# 私有仓 Actions 因组织扣费被拦，构建改走本公开仓（与 zysicyj 的 build-private*.yml 同一模式）。
+#
+# Trust boundary: repository_dispatch client_payload and workflow_dispatch inputs are untrusted.
+#   只接受 ref（分支名或 40 位 sha，严格正则）与可选 targets（wechatgame,web-mobile 白名单），其余字段一律忽略。
+# 公开仓日志所有人可见：
+#   - 不 echo 任何密钥；PRIVATE_REPO_ACCESS_TOKEN 只给 actions/checkout，persist-credentials: false；
+#   - 不把源码 / 构建日志全文打到控制台：typecheck 只打 "error TS" 行，单测只打汇总与失败用例名，
+#     Cocos 构建只打退出码、用时和 " - error:" 行（截断）；完整日志进 ran-ci-logs artifact。
+#   - 注意：artifact 在公开仓对任何登录 GitHub 的用户可下载（含编译后的游戏代码），保留 7 天。
+#
+# 触发：
+#   gh api repos/zysicyj-xxc/public-builder/dispatches -f event_type=ran-build \
+#     -F 'client_payload[ref]=main' -F 'client_payload[targets]=wechatgame,web-mobile'
+#   gh workflow run ran-build.yml -R zysicyj-xxc/public-builder -f ref=main
+
+name: Ran Build
+
+on:
+  repository_dispatch:
+    types: [ran-build]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'zysicyj-xxc/ran 的分支名或 40 位 commit sha'
+        required: true
+        default: main
+        type: string
+      targets:
+        description: '逗号分隔：wechatgame,web-mobile'
+        required: false
+        default: 'wechatgame,web-mobile'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ran-build-${{ github.event.client_payload.ref || github.event.inputs.ref }}
+  cancel-in-progress: false
+
+env:
+  CREATOR_VERSION: 3.8.6
+  CREATOR_URL: https://download.cocos.com/CocosCreator/v3.8.6/CocosCreator-v3.8.6-win-032501.zip
+  NODE_VERSION: '20'
+
+jobs:
+  validate:
+    name: validate-payload
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      ref: ${{ steps.v.outputs.ref }}
+      targets: ${{ steps.v.outputs.targets }}
+    steps:
+      - name: Validate payload
+        id: v
+        shell: bash
+        env:
+          RAW_REF: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
+          RAW_TARGETS: ${{ github.event.client_payload.targets || github.event.inputs.targets }}
+        run: |
+          set -euo pipefail
+          ref="${RAW_REF:-}"
+          if [ -z "$ref" ]; then echo "ERROR: ref is empty" >&2; exit 1; fi
+          if [ "${#ref}" -gt 100 ]; then echo "ERROR: ref too long" >&2; exit 1; fi
+          sha_re='^[0-9a-f]{40}$'
+          # 分支名：1~4 段，每段字母数字开头，只含 [A-Za-z0-9._-]；不允许 ..、.lock 结尾、refs/ 前缀
+          branch_re='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(/[A-Za-z0-9][A-Za-z0-9._-]{0,63}){0,3}$'
+          if [[ "$ref" =~ $sha_re ]]; then
+            :
+          elif [[ "$ref" =~ $branch_re ]] && [[ "$ref" != *..* ]] && [[ "$ref" != *.lock ]] && [[ "$ref" != refs/* ]]; then
+            :
+          else
+            echo "ERROR: ref failed allowlist" >&2
+            exit 1
+          fi
+
+          raw_targets="${RAW_TARGETS:-}"
+          [ -n "$raw_targets" ] || raw_targets='wechatgame,web-mobile'
+          if [ "${#raw_targets}" -gt 64 ]; then echo "ERROR: targets too long" >&2; exit 1; fi
+          out=","
+          IFS=',' read -ra parts <<< "$raw_targets"
+          for t in "${parts[@]}"; do
+            t="$(printf '%s' "$t" | tr -d '[:space:]')"
+            [ -n "$t" ] || continue
+            case "$t" in
+              wechatgame|web-mobile) ;;
+              *) echo "ERROR: target failed allowlist (allowed: wechatgame, web-mobile)" >&2; exit 1 ;;
+            esac
+            case "$out" in *",$t,"*) ;; *) out="$out$t," ;; esac
+          done
+          if [ "$out" = "," ]; then echo "ERROR: no targets" >&2; exit 1; fi
+
+          echo "OK ref=$ref targets=$out"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "targets=$out" >> "$GITHUB_OUTPUT"
+
+  # 纯逻辑检查：npm ci + typecheck + 单测（不需要 Cocos 编辑器）
+  checks:
+    name: npm ci / typecheck / test
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/ran
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.validate.outputs.ref }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: npm ci
+        run: |
+          set -euo pipefail
+          mkdir -p ci-logs
+          echo "commit=$(git rev-parse HEAD)"
+          npm ci --no-audit --no-fund > ci-logs/npm-ci.log 2>&1 || { echo "::error::npm ci 失败（完整日志见 ran-ci-logs artifact）"; tail -n 5 ci-logs/npm-ci.log | cut -c1-300; exit 1; }
+          echo "npm ci OK"
+      - name: typecheck
+        id: typecheck
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          npm run typecheck > ci-logs/typecheck.log 2>&1
+          rc=$?
+          grep -E 'error TS[0-9]+' ci-logs/typecheck.log | head -n 30 | cut -c1-300 || true
+          echo "typecheck exit=$rc"
+          exit $rc
+      - name: test
+        id: test
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          npm test > ci-logs/test.log 2>&1
+          rc=$?
+          # 只打汇总与失败用例名，不打断言里的代码片段
+          grep -aE '^\s*(FAIL |Test Files |Tests |Duration )' ci-logs/test.log | head -n 40 | cut -c1-300 || true
+          echo "test exit=$rc"
+          exit $rc
+      - name: Summary
+        if: always()
+        env:
+          TC: ${{ steps.typecheck.outcome }}
+          TS: ${{ steps.test.outcome }}
+        run: |
+          {
+            echo "## 《染》检查（$(git rev-parse --short HEAD)）"
+            echo "| 步骤 | 结果 |"
+            echo "|---|---|"
+            echo "| typecheck | $TC |"
+            echo "| test | $TS |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          [ "$TC" = success ] && [ "$TS" = success ]
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ran-ci-logs-checks
+          path: ci-logs/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # Cocos Creator 3.8.6 命令行构建（Windows 官方 zip，无需登录）
+  cocos:
+    name: cocos build
+    needs: validate
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/ran
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.validate.outputs.ref }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Cache Cocos Creator zip
+        id: cache-creator
+        uses: actions/cache@v4
+        with:
+          path: C:\cocos-zip
+          key: cocos-creator-${{ env.CREATOR_VERSION }}-win-032501
+      - name: Download Cocos Creator
+        if: steps.cache-creator.outputs.cache-hit != 'true'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path C:\cocos-zip | Out-Null
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          curl.exe -fsSL --retry 3 -o C:\cocos-zip\creator.zip $env:CREATOR_URL
+          if ($LASTEXITCODE -ne 0) { throw "download failed ($LASTEXITCODE)" }
+          Write-Host "download $([int]$sw.Elapsed.TotalSeconds)s, $((Get-Item C:\cocos-zip\creator.zip).Length) bytes"
+      - name: Extract Cocos Creator
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          7z x C:\cocos-zip\creator.zip -oC:\cocos -y | Out-Null
+          if (-not (Test-Path C:\cocos\CocosCreator.exe)) { throw 'CocosCreator.exe not found after extract' }
+          Write-Host "extract $([int]$sw.Elapsed.TotalSeconds)s"
+      - name: Cocos build
+        id: build
+        continue-on-error: true
+        env:
+          TARGETS: ${{ needs.validate.outputs.targets }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $project = (Resolve-Path .).Path
+          New-Item -ItemType Directory -Force -Path "$project\ci-logs" | Out-Null
+          Write-Host "commit=$(git rev-parse HEAD)"
+          $failed = @()
+          foreach ($name in @('wechatgame', 'web-mobile')) {
+            if (-not $env:TARGETS.Contains(",$name,")) { continue }
+            $cfg = (Resolve-Path "build-config/$name.json").Path
+            $log = "$project\ci-logs\build-$name.log"
+            $argLine = "--project `"$project`" --build `"configPath=$cfg;logDest=$log`""
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $p = Start-Process -FilePath C:\cocos\CocosCreator.exe -ArgumentList $argLine -PassThru -NoNewWindow `
+              -RedirectStandardOutput "$project\ci-logs\stdout-$name.log" -RedirectStandardError "$project\ci-logs\stderr-$name.log"
+            if (-not $p.WaitForExit(30 * 60 * 1000)) {
+              Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+              Get-Process CocosCreator -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+              $code = -1
+            } else { $code = $p.ExitCode }
+            Write-Host "[$name] exit=$code (36=success) time=$([int]$sw.Elapsed.TotalSeconds)s"
+            # 只打 " - error:" 行（截断），不打代码片段；完整日志见 artifact
+            foreach ($f in @($log, "$project\ci-logs\stdout-$name.log")) {
+              if (Test-Path $f) {
+                Select-String -Path $f -Pattern ' - error:|login|Login|登录' -Encoding UTF8 | Select-Object -First 30 |
+                  ForEach-Object { $l = $_.Line; if ($l.Length -gt 300) { $l = $l.Substring(0, 300) }; Write-Host "  $l" }
+              }
+            }
+            if ($code -ne 36) { $failed += $name; Write-Host "::error::[$name] Cocos build failed (exit $code)" }
+          }
+          if ($failed.Count -gt 0) { exit 1 }
+      - name: check-size (wechatgame)
+        id: size
+        if: contains(needs.validate.outputs.targets, ',wechatgame,') && steps.build.outcome == 'success'
+        continue-on-error: true
+        run: |
+          node tools/check-size.mjs --dir build/wechatgame *> ci-logs/size.txt
+          $rc = $LASTEXITCODE
+          Get-Content ci-logs/size.txt -Encoding UTF8
+          exit $rc
+      - name: Summary
+        if: always()
+        env:
+          BUILD: ${{ steps.build.outcome }}
+          SIZE: ${{ steps.size.outcome }}
+          TARGETS: ${{ needs.validate.outputs.targets }}
+        run: |
+          $sha = git rev-parse --short HEAD
+          $lines = @("## 《染》Cocos 构建（$sha）", '', "targets: ``$($env:TARGETS.Trim(','))``  build: **$env:BUILD**  check-size: **$env:SIZE**", '')
+          if (Test-Path ci-logs/size.txt) {
+            $main = Select-String -Path ci-logs/size.txt -Pattern '主包：' -Encoding UTF8 | Select-Object -First 1
+            if ($main) { $lines += "**微信主包**：$($main.Line -replace '^\[check-size\]\s*', '')"; $lines += '' }
+            $lines += '```'
+            $lines += (Get-Content ci-logs/size.txt -Encoding UTF8)
+            $lines += '```'
+          }
+          $lines -join "`n" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          if ($env:BUILD -ne 'success' -or ($env:SIZE -ne 'success' -and $env:SIZE -ne 'skipped')) { exit 1 }
+      - name: Upload wechatgame
+        if: steps.build.outcome == 'success' && contains(needs.validate.outputs.targets, ',wechatgame,')
+        uses: actions/upload-artifact@v4
+        with:
+          name: ran-wechatgame
+          path: build/wechatgame
+          retention-days: 7
+      - name: Upload web-mobile
+        if: steps.build.outcome == 'success' && contains(needs.validate.outputs.targets, ',web-mobile,')
+        uses: actions/upload-artifact@v4
+        with:
+          name: ran-web-mobile
+          path: build/web-mobile
+          retention-days: 7
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ran-ci-logs-cocos
+          path: |
+            ci-logs/
+            temp/logs/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # web-mobile 无头 Chromium 冒烟（截图 + 点一格）
+  smoke:
+    name: web smoke
+    needs: [validate, cocos]
+    if: ${{ always() && needs.cocos.result == 'success' && contains(needs.validate.outputs.targets, ',web-mobile,') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/ran
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.validate.outputs.ref }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - uses: actions/download-artifact@v4
+        with:
+          name: ran-web-mobile
+          path: build/web-mobile
+      - name: Install deps + Chromium
+        run: |
+          set -euo pipefail
+          npm ci --no-audit --no-fund > /dev/null 2>&1 || { echo "::error::npm ci failed"; exit 1; }
+          npx playwright-core install --with-deps chromium > /dev/null 2>&1 || { echo "::error::chromium install failed"; exit 1; }
+      - name: Smoke
+        run: node tools/ci/smoke-web.mjs --dir build/web-mobile --out ci-logs/smoke
+      - name: Upload smoke
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ran-smoke
+          path: ci-logs/smoke
+          retention-days: 7
+          if-no-files-found: ignore
+
+  notify:
+    name: Notify mail
+    needs: [validate, checks, cocos, smoke]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Send mail
+        continue-on-error: true
+        uses: ./.github/actions/notify-mail
+        with:
+          workflow: ran-build
+          result: ${{ contains(needs.*.result, 'failure') && 'failure' || contains(needs.*.result, 'cancelled') && 'cancelled' || 'success' }}
+          ref: ${{ needs.validate.outputs.ref }}
+          job_results: |
+            validate: ${{ needs.validate.result }}
+            checks: ${{ needs.checks.result }}
+            cocos: ${{ needs.cocos.result }}
+            smoke: ${{ needs.smoke.result }}
+          note: ${{ format('《染》构建结束。targets={0}', needs.validate.outputs.targets) }}
+          run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          auth_code: ${{ secrets.NOTIFY_MAIL_AUTH_CODE }}
+          mail_from: ${{ secrets.NOTIFY_MAIL_FROM }}
+          mail_to: ${{ secrets.NOTIFY_MAIL_TO }}
+          github_token: ${{ github.token }}

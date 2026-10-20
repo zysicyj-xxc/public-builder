@@ -7,7 +7,10 @@
 # blog-sync, daymica-capture.
 # export-diff regenerates canonical tokens (ADR 0006 export_web_tokens via the
 # flutter test, not bare dart run) and fails if generated/ or utools/ drifts.
-# gate (<plugin>) runs pnpm test, the command used by the private utools-test workflow.
+# gate (<plugin>) runs the plugin test script. The private utools-test workflow
+# uses pnpm test. Hosted checkout has package.json and often no pnpm-lock.yaml
+# under the plugin or utools/, so the installer also accepts a plugin
+# package-lock.json, a repo-root pnpm-lock.yaml, or an install from package.json.
 # Node 22, Flutter version from the private repo .flutter-version.
 # The gate matrix is meta's JSON plugin list. Job-level if cannot read matrix.
 # export-diff stays a separate job.
@@ -240,25 +243,7 @@ jobs:
           GATE_LOG_KEY: ${{ secrets.GATE_LOG_KEY }}
           QUIET_LABEL: ${{ matrix.plugin }}
           QUIET_KIND: generic
-          QUIET_CMD: |
-            set -euo pipefail
-            case "$PLUGIN" in
-              easy-script|bookmark-collector|blog-sync|daymica-capture) ;;
-              *) exit 1 ;;
-            esac
-            dir="utools/${PLUGIN}"
-            test -f "${dir}/package.json"
-            corepack enable
-            if [ -f "${dir}/pnpm-lock.yaml" ]; then
-              cd "${dir}"
-              pnpm install --frozen-lockfile
-              pnpm test
-            elif [ -f utools/pnpm-lock.yaml ]; then
-              pnpm install --frozen-lockfile --dir utools
-              pnpm --dir "${dir}" test
-            else
-              exit 1
-            fi
+          QUIET_CMD: bash "$GITHUB_WORKSPACE/_pb/.github/scripts/utools-gate.sh"
         run: bash "$GITHUB_WORKSPACE/_pb/.github/scripts/quiet.sh"
 
   report:

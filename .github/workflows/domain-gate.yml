@@ -107,15 +107,29 @@ jobs:
           ref: ${{ needs.meta.outputs.sha }}
           persist-credentials: false
           fetch-depth: 1
+      - uses: actions/checkout@v4
+        with:
+          path: _pb
+          persist-credentials: false
+          fetch-depth: 1
       - name: assert domain registry
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if (-not (Test-Path -LiteralPath './scripts/lib/assert-domain-registry.ps1')) {
-            throw 'missing scripts/lib/assert-domain-registry.ps1'
-          }
-          & ./scripts/lib/assert-domain-registry.ps1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        env:
+          GATE_LOG_KEY: ${{ secrets.GATE_LOG_KEY }}
+          QUIET_LABEL: domain
+          QUIET_KIND: generic
+          QUIET_CMD: |
+            set -euo pipefail
+            test -f ./scripts/lib/assert-domain-registry.ps1
+            pwsh -NoProfile -NonInteractive -File ./scripts/lib/assert-domain-registry.ps1
+        run: bash "$GITHUB_WORKSPACE/_pb/.github/scripts/quiet.sh"
+      - name: Upload encrypted log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-log-${{ github.run_id }}-domain
+          path: ${{ runner.temp }}/gate-encrypted
+          retention-days: 1
+          if-no-files-found: ignore
 
   report:
     name: post-statuses
@@ -141,9 +155,30 @@ jobs:
             cancelled) state=failure; desc=cancelled ;;
             *) state=failure; desc=failure ;;
           esac
-          echo "status assert domain registry ${state}"
+          echo "status ${state}"
           gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
             -f state="$state" \
             -f target_url="${RUN_URL}" \
             -f description="$desc" \
             -f context="assert domain registry" >/dev/null
+
+  purge-logs:
+    name: schedule-log-purge
+    needs: [meta, report]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Request log purge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          DISPATCH_REF: ${{ github.ref_name }}
+        run: bash .github/scripts/request-purge.sh || echo "FAIL purge-request"

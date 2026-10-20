@@ -1,0 +1,71 @@
+# Poll zysicyj-xxc/zysicyj for open PR heads and main, then dispatch the
+# matching public-builder gate when its commit status is missing.
+# Trust boundary: schedule and workflow_dispatch only. No pull_request.
+# PRIVATE_REPO_ACCESS_TOKEN reads the private repo and writes statuses.
+# github.token (actions: write) dispatches workflows in this repo.
+
+name: Poll Private Gates
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      only:
+        description: 'One gate id, or empty for every missing gate. quality, flutter, daymica, ci-scripts, i18n, visual, domain, scripts, web, utools.'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: poll-private-gates
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  poll:
+    name: poll
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Self-check
+        run: bash .github/scripts/poll-gates.sh --selftest
+
+      - name: Poll and dispatch
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          DISPATCH_TOKEN: ${{ github.token }}
+          DISPATCH_REF: ${{ github.ref_name }}
+          ONLY: ${{ github.event.inputs.only }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash .github/scripts/poll-gates.sh
+
+  purge-logs:
+    name: schedule-log-purge
+    needs: poll
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Request log purge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          DISPATCH_REF: ${{ github.ref_name }}
+        run: bash .github/scripts/request-purge.sh || echo "FAIL purge-request"

@@ -25,6 +25,11 @@ on:
         description: 'Commit SHA for checkout and status (default: resolve ref)'
         required: false
         type: string
+      apps:
+        description: 'Comma list of apps. Empty runs every i18n package.'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -46,6 +51,7 @@ jobs:
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
       ref: ${{ steps.resolve.outputs.ref }}
+      run_apps: ${{ steps.pick.outputs.run_apps }}
     steps:
       - name: Checkout public-builder
         uses: actions/checkout@v4
@@ -58,9 +64,41 @@ jobs:
           sha: ${{ github.event.client_payload.sha || github.event.inputs.sha }}
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
 
+      - name: Pick apps
+        id: pick
+        env:
+          RAW: ${{ github.event.client_payload.apps || github.event.inputs.apps }}
+        run: |
+          set -euo pipefail
+          python3 - "$RAW" <<'PY'
+          import os, sys
+          order = [
+              "daymica", "mail-box", "password-vault", "yaoxiaobai", "eye-care",
+              "footprint", "water-tracker", "admin-app", "shared_package",
+          ]
+          raw = (sys.argv[1] or "").replace(" ", "")
+          if raw == "":
+              apps = order
+          else:
+              apps = []
+              for part in raw.split(","):
+                  if not part:
+                      continue
+                  if part not in order:
+                      sys.exit("FAIL apps")
+                  if part not in apps:
+                      apps.append(part)
+              if not apps:
+                  sys.exit("FAIL apps")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write("run_apps= " + " ".join(apps) + " \n")
+          print("PASS apps count=" + str(len(apps)))
+          PY
+
       - name: Set pending statuses
         env:
           SHA: ${{ steps.resolve.outputs.sha }}
+          RUN_APPS: ${{ steps.pick.outputs.run_apps }}
           GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -73,18 +111,18 @@ jobs:
             gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
               -f state="pending" \
               -f target_url="${RUN_URL}" \
-              -f description="running on public-builder" \
+              -f description="running" \
               -f context="$1" >/dev/null
           }
-          post "i18n-gate (daymica)"
-          post "i18n-gate (mail-box)"
-          post "i18n-gate (password-vault)"
-          post "i18n-gate (yaoxiaobai)"
-          post "i18n-gate (eye-care)"
-          post "i18n-gate (footprint)"
-          post "i18n-gate (water-tracker)"
-          post "i18n-gate (admin-app)"
-          post "i18n-gate (shared_package)"
+          for app in ${RUN_APPS}; do
+            case "$app" in
+              daymica|mail-box|password-vault|yaoxiaobai|eye-care|footprint|water-tracker|admin-app|shared_package)
+                post "i18n-gate (${app})"
+                ;;
+              *) echo "FAIL apps" >&2; exit 1 ;;
+            esac
+          done
+          echo "PASS pending"
 
       - name: Post failure when resolve fails
         if: failure()
@@ -124,6 +162,7 @@ jobs:
   verify:
     name: i18n-gate (${{ matrix.app }})
     needs: meta
+    if: contains(needs.meta.outputs.run_apps, format(' {0} ', matrix.app))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -198,15 +237,39 @@ jobs:
           channel: 'stable'
           cache: true
 
+      - uses: actions/checkout@v4
+        if: steps.detect.outputs.present == 'true'
+        with:
+          path: _pb
+          persist-credentials: false
+          fetch-depth: 1
+
+      - uses: actions/cache@v4
+        if: steps.detect.outputs.present == 'true'
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-i18n-${{ matrix.app }}-${{ hashFiles(format('{0}/pubspec.lock', matrix.dir)) }}
+          restore-keys: |
+            pub-${{ runner.os }}-i18n-${{ matrix.app }}-
+
       - name: l10n gates
         if: steps.detect.outputs.present == 'true'
         env:
           DIR: ${{ matrix.dir }}
-        run: |
-          set -euo pipefail
-          cd "${DIR}"
-          flutter pub get
-          flutter test --no-pub test/l10n
+          GATE_LOG_KEY: ${{ secrets.GATE_LOG_KEY }}
+          QUIET_LABEL: ${{ matrix.app }}
+          QUIET_KIND: flutter-test
+          QUIET_CMD: 'cd "$DIR" && flutter pub get && flutter test --concurrency=2 --reporter json --no-pub test/l10n'
+        run: bash "$GITHUB_WORKSPACE/_pb/.github/scripts/quiet.sh"
+
+      - name: Upload encrypted log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-log-${{ github.run_id }}-i18n-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/gate-encrypted
+          retention-days: 1
+          if-no-files-found: ignore
 
   report:
     name: post-statuses
@@ -222,6 +285,7 @@ jobs:
           STATUS_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           RUN_ID: ${{ github.run_id }}
+          RUN_APPS: ${{ needs.meta.outputs.run_apps }}
         run: |
           set -euo pipefail
           if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
@@ -230,17 +294,15 @@ jobs:
           fi
           declare -A conc=()
           declare -A detail=()
-          contexts=(
-            "i18n-gate (daymica)"
-            "i18n-gate (mail-box)"
-            "i18n-gate (password-vault)"
-            "i18n-gate (yaoxiaobai)"
-            "i18n-gate (eye-care)"
-            "i18n-gate (footprint)"
-            "i18n-gate (water-tracker)"
-            "i18n-gate (admin-app)"
-            "i18n-gate (shared_package)"
-          )
+          contexts=()
+          for app in ${RUN_APPS}; do
+            case "$app" in
+              daymica|mail-box|password-vault|yaoxiaobai|eye-care|footprint|water-tracker|admin-app|shared_package)
+                contexts+=("i18n-gate (${app})")
+                ;;
+              *) echo "FAIL apps" >&2; exit 1 ;;
+            esac
+          done
           for attempt in 1 2 3 4 5 6; do
             conc=()
             detail=()
@@ -291,3 +353,24 @@ jobs:
           for ctx in "${contexts[@]}"; do
             post "$ctx" "${conc[$ctx]:-}" "${detail[$ctx]:-}"
           done
+
+  purge-logs:
+    name: schedule-log-purge
+    needs: [meta, report]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Request log purge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          DISPATCH_REF: ${{ github.ref_name }}
+        run: bash .github/scripts/request-purge.sh || echo "FAIL purge-request"

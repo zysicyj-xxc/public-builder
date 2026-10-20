@@ -222,6 +222,19 @@ jobs:
           STAGING_ANDROID_KEY_PASSWORD: ${{ secrets.STAGING_ANDROID_KEY_PASSWORD }}
         run: |
           $ErrorActionPreference = 'Stop'
+          foreach ($envItem in Get-ChildItem Env:) {
+            if ($envItem.Name -notmatch '(BASE64|_B64)$') { continue }
+            if ([string]::IsNullOrWhiteSpace($envItem.Value)) { continue }
+            $raw = ($envItem.Value -replace '\s','')
+            try { $bytes = [Convert]::FromBase64String($raw) } catch { continue }
+            $text = [Text.Encoding]::UTF8.GetString($bytes)
+            foreach ($line in ($text -split "\r?\n")) {
+              if ($line.Length -lt 8) { continue }
+              if ($line.Contains('::')) { continue }
+              $safe = $line.Replace('%','%25').Replace("`r",'%0D').Replace("`n",'%0A')
+              Write-Host "::add-mask::$safe"
+            }
+          }
           if ($env:APP_SLUG -notin @('daymica', 'password-vault')) { throw 'app failed allowlist' }
           $env:TMPDIR = $env:RUNNER_TEMP
           $env:TEMP = $env:RUNNER_TEMP

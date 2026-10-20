@@ -1,19 +1,10 @@
-# Full flutter test for apps/mail-box and apps/shared_package on zysicyj-xxc/zysicyj.
-# Reuses the private visual-lint dispatcher (event_type visual-lint). That
-# dispatcher already fires for apps/mail-box and apps/shared_package changes,
-# including tests, arb, and golden files. i18n-gate does not: golden-only
-# shared_package updates do not dispatch it.
-# mail-box runs when the private diff touches apps/mail-box/** or
-# apps/shared_package/**. shared_package runs only for apps/shared_package/**.
-# Other dispatches write no status for the job they skip.
-# workflow_dispatch input only=shared_package runs that package on the given
-# SHA, skips path filters, and does not run or status mail-box.
-#
-# Trust boundary: repository_dispatch client_payload and workflow_dispatch
-# inputs are untrusted. Allowlist ref/sha before any API call. Status posts
-# run in separate jobs so PRIVATE_REPO_ACCESS_TOKEN is not on the runner
-# that executes private-repo code. Logs list match flags only, not paths,
-# file bodies, or tokens.
+# Flutter tests for the small apps on zysicyj-xxc/zysicyj.
+# mail-box, shared_package, footprint, eye-care, admin-app, and water-tracker
+# run on every dispatch. There is no path filter.
+# only=mail-box,footprint limits the run to those apps. Empty runs all.
+# Trust boundary: repository_dispatch (visual-lint, kept for compatibility)
+# and workflow_dispatch only. No pull_request.
+# Status contexts: flutter-test (<app>).
 
 name: Flutter Test
 
@@ -31,17 +22,18 @@ on:
         required: false
         type: string
       only:
-        description: 'Manual override. shared_package runs only that package on the SHA and skips mail-box. Empty uses path filters.'
+        description: 'Comma list of apps. Empty runs mail-box, shared_package, footprint, eye-care, admin-app, water-tracker.'
         required: false
         type: string
         default: ''
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
-  group: flutter-test-${{ github.event.client_payload.sha || github.event.inputs.sha || github.event.client_payload.ref || github.event.inputs.ref }}
-  cancel-in-progress: true
+  group: flutter-test-${{ github.event.client_payload.sha || github.event.inputs.sha || github.event.client_payload.ref || github.event.inputs.ref }}-${{ github.event.inputs.only || github.event.client_payload.only || 'all' }}
+  cancel-in-progress: false
 
 defaults:
   run:
@@ -54,11 +46,12 @@ jobs:
     timeout-minutes: 5
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
-      run: ${{ steps.paths.outputs.run }}
-      shared_package: ${{ steps.paths.outputs.shared_package }}
+      include: ${{ steps.pick.outputs.include }}
     steps:
-      - name: Checkout public-builder
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
 
       - name: Self-check path matcher
         run: bash .github/scripts/flutter_test_paths.sh --selftest
@@ -71,103 +64,82 @@ jobs:
           sha: ${{ github.event.client_payload.sha || github.event.inputs.sha }}
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
 
-      - name: Decide from private diff
-        id: paths
+      - name: Pick apps
+        id: pick
         env:
-          REF: ${{ steps.resolve.outputs.ref }}
-          SHA: ${{ steps.resolve.outputs.sha }}
-          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RAW: ${{ github.event.client_payload.only || github.event.inputs.only }}
         run: |
           set -euo pipefail
-          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
-            echo "ERROR: sha failed allowlist" >&2
-            exit 1
-          fi
-          tmp=$(mktemp)
-          trap 'rm -f "$tmp"' EXIT
-          if printf '%s' "$REF" | grep -Eq '^refs/pull/[0-9]+/(head|merge)$'; then
-            n=$(printf '%s' "$REF" | sed -E 's#^refs/pull/([0-9]+)/(head|merge)$#\1#')
-            gh api --paginate "repos/zysicyj-xxc/zysicyj/pulls/${n}/files?per_page=100" \
-              --jq '.[] | .filename, (.previous_filename // empty)' > "$tmp"
-          else
-            n=$(gh api "repos/zysicyj-xxc/zysicyj/commits/${SHA}/pulls" \
-              --jq '.[] | [.number, .head.sha] | @tsv' \
-              | awk -F '\t' -v sha="$SHA" '$2==sha {print $1; exit}')
-            if printf '%s' "$n" | grep -Eq '^[0-9]+$'; then
-              gh api --paginate "repos/zysicyj-xxc/zysicyj/pulls/${n}/files?per_page=100" \
-                --jq '.[] | .filename, (.previous_filename // empty)' > "$tmp"
-            else
-              gh api "repos/zysicyj-xxc/zysicyj/commits/${SHA}" \
-                --jq '.files[]? | .filename, (.previous_filename // empty)' > "$tmp"
-            fi
-          fi
-          result=$(bash .github/scripts/flutter_test_paths.sh < "$tmp")
-          printf '%s\n' "$result"
-          run=$(printf '%s\n' "$result" | awk -F= '$1=="run"{print $2}')
-          shared=$(printf '%s\n' "$result" | awk -F= '$1=="shared_package"{print $2}')
-          if [ "$run" != "true" ] && [ "$run" != "false" ]; then
-            echo "ERROR: path matcher returned no decision" >&2
-            exit 1
-          fi
-          if [ "$shared" != "1" ] && [ "$shared" != "0" ]; then
-            echo "ERROR: path matcher returned no shared_package flag" >&2
-            exit 1
-          fi
-          echo "run=$run" >> "$GITHUB_OUTPUT"
-          echo "shared_package=$shared" >> "$GITHUB_OUTPUT"
-          if [ "$run" = "true" ]; then
-            echo "flutter-test (mail-box): paths match"
-          else
-            echo "flutter-test (mail-box): skip"
-          fi
-          if [ "$shared" = "1" ]; then
-            echo "flutter-test (shared_package): paths match"
-          else
-            echo "flutter-test (shared_package): skip"
-          fi
+          python3 - "$RAW" <<'PY'
+          import json, os, sys
+          dirs = {
+              "mail-box": "apps/mail-box",
+              "shared_package": "apps/shared_package",
+              "footprint": "apps/footprint",
+              "eye-care": "apps/eye-care",
+              "admin-app": "apps/admin-app",
+              "water-tracker": "apps/water-tracker",
+          }
+          raw = (sys.argv[1] or "").replace(" ", "")
+          if raw == "":
+              apps = list(dirs)
+          else:
+              apps = []
+              for part in raw.split(","):
+                  if not part:
+                      continue
+                  if part not in dirs:
+                      sys.exit("FAIL apps")
+                  if part not in apps:
+                      apps.append(part)
+              if not apps:
+                  sys.exit("FAIL apps")
+          include = [{"app": app, "dir": dirs[app]} for app in apps]
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write("include=" + json.dumps(include, separators=(",", ":")) + "\n")
+          print("PASS apps count=" + str(len(apps)))
+          PY
 
-      - name: Set pending status
-        if: steps.paths.outputs.run == 'true' && github.event.inputs.only != 'shared_package'
+      - name: Set pending statuses
         env:
           SHA: ${{ steps.resolve.outputs.sha }}
+          INCLUDE: ${{ steps.pick.outputs.include }}
           GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
-            echo "ERROR: sha failed allowlist" >&2
+            echo "FAIL sha" >&2
             exit 1
           fi
-          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
-            -f state="pending" \
-            -f target_url="${RUN_URL}" \
-            -f description="running on public-builder" \
-            -f context="flutter-test (mail-box)" >/dev/null
-
-      - name: Set shared_package pending status
-        if: steps.paths.outputs.shared_package == '1' || github.event.inputs.only == 'shared_package'
-        env:
-          SHA: ${{ steps.resolve.outputs.sha }}
-          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
-            echo "ERROR: sha failed allowlist" >&2
-            exit 1
-          fi
-          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
-            -f state="pending" \
-            -f target_url="${RUN_URL}" \
-            -f description="running on public-builder" \
-            -f context="flutter-test (shared_package)" >/dev/null
+          python3 - "$INCLUDE" <<'PY'
+          import json, os, subprocess, sys
+          include = json.loads(sys.argv[1])
+          sha = os.environ["SHA"]
+          url = os.environ["RUN_URL"]
+          for item in include:
+              ctx = "flutter-test (" + item["app"] + ")"
+              subprocess.check_call([
+                  "gh", "api", "--method", "POST",
+                  f"repos/zysicyj-xxc/zysicyj/statuses/{sha}",
+                  "-f", "state=pending",
+                  "-f", f"target_url={url}",
+                  "-f", "description=running",
+                  "-f", f"context={ctx}",
+              ], stdout=subprocess.DEVNULL)
+          print("PASS pending count=" + str(len(include)))
+          PY
 
   test:
-    name: flutter-test (mail-box)
+    name: flutter-test (${{ matrix.app }})
     needs: meta
-    if: needs.meta.outputs.run == 'true' && github.event.inputs.only != 'shared_package'
+    if: needs.meta.outputs.include != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.meta.outputs.include) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -176,176 +148,135 @@ jobs:
           ref: ${{ needs.meta.outputs.sha }}
           persist-credentials: false
           fetch-depth: 1
-
+      - uses: actions/checkout@v4
+        with:
+          path: _pb
+          persist-credentials: false
+          fetch-depth: 1
       - name: Read Flutter version
         id: flutter
         run: |
           set -euo pipefail
           if [ ! -f .flutter-version ]; then
-            echo "ERROR: missing .flutter-version" >&2
+            echo "FAIL flutter-version" >&2
             exit 1
           fi
           ver=$(tr -d '[:space:]' < .flutter-version)
           if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "ERROR: .flutter-version is not X.Y.Z" >&2
+            echo "FAIL flutter-version" >&2
             exit 1
           fi
           echo "version=$ver" >> "$GITHUB_OUTPUT"
-          echo "flutter-version=$ver"
-
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: ${{ steps.flutter.outputs.version }}
           channel: stable
           cache: true
-
+      - uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-${{ matrix.app }}-${{ hashFiles(format('{0}/pubspec.lock', matrix.dir)) }}
+          restore-keys: |
+            pub-${{ runner.os }}-${{ matrix.app }}-
       - name: flutter pub get and test
-        working-directory: apps/mail-box
-        run: |
-          set -euo pipefail
-          if [ ! -f pubspec.yaml ]; then
-            echo "ERROR: missing apps/mail-box/pubspec.yaml" >&2
-            exit 1
-          fi
-          flutter pub get
-          flutter test
+        env:
+          GATE_LOG_KEY: ${{ secrets.GATE_LOG_KEY }}
+          QUIET_LABEL: ${{ matrix.app }}
+          QUIET_KIND: flutter-test
+          QUIET_DIR: ${{ matrix.dir }}
+          QUIET_CMD: 'cd "$QUIET_DIR" && flutter pub get && flutter test --concurrency=2 --reporter json'
+        run: bash "$GITHUB_WORKSPACE/_pb/.github/scripts/quiet.sh"
+      - name: Upload encrypted log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-log-${{ github.run_id }}-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/gate-encrypted
+          retention-days: 1
+          if-no-files-found: ignore
 
   report:
-    name: post-status
+    name: post-statuses
     needs: [meta, test]
-    if: always() && needs.meta.result == 'success' && needs.meta.outputs.run == 'true' && github.event.inputs.only != 'shared_package'
+    if: always() && needs.meta.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Post conclusion
+      - name: Post conclusions
         env:
           SHA: ${{ needs.meta.outputs.sha }}
-          RESULT: ${{ needs.test.result }}
-          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          INCLUDE: ${{ needs.meta.outputs.include }}
+          ACTIONS_TOKEN: ${{ github.token }}
+          STATUS_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
           if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
-            echo "ERROR: sha failed allowlist" >&2
+            echo "FAIL sha" >&2
             exit 1
           fi
-          case "$RESULT" in
-            success) state=success; desc=success ;;
-            cancelled) state=failure; desc=cancelled ;;
-            *) state=failure; desc=failure ;;
-          esac
-          echo "status flutter-test (mail-box) ${state}"
-          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
-            -f state="$state" \
-            -f target_url="${RUN_URL}" \
-            -f description="$desc" \
-            -f context="flutter-test (mail-box)" >/dev/null
+          python3 - <<'PY'
+          import json, os, subprocess, time
+          include = json.loads(os.environ["INCLUDE"])
+          contexts = ["flutter-test (" + item["app"] + ")" for item in include]
+          repo = os.environ["GITHUB_REPOSITORY"]
+          run_id = os.environ["RUN_ID"]
+          sha = os.environ["SHA"]
+          url = os.environ["RUN_URL"]
+          env = dict(os.environ)
+          env["GH_TOKEN"] = os.environ["ACTIONS_TOKEN"]
+          found = {}
+          for _ in range(6):
+              raw = subprocess.check_output([
+                  "gh", "api", "--paginate",
+                  f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100",
+                  "--jq", ".jobs[] | [.name, (.conclusion // \"\")] | @tsv",
+              ], env=env, text=True)
+              found = {}
+              for line in raw.splitlines():
+                  name, _, conclusion = line.partition("\t")
+                  found[name] = conclusion
+              if all(ctx in found for ctx in contexts):
+                  break
+              time.sleep(5)
+          env["GH_TOKEN"] = os.environ["STATUS_TOKEN"]
+          for ctx in contexts:
+              conclusion = found.get(ctx, "")
+              if conclusion == "success":
+                  state, desc = "success", "success"
+              elif conclusion == "cancelled":
+                  state, desc = "failure", "cancelled"
+              else:
+                  state, desc = "failure", "failure"
+              print("status " + state)
+              subprocess.check_call([
+                  "gh", "api", "--method", "POST",
+                  f"repos/zysicyj-xxc/zysicyj/statuses/{sha}",
+                  "-f", f"state={state}",
+                  "-f", f"target_url={url}",
+                  "-f", f"description={desc}",
+                  "-f", f"context={ctx}",
+              ], env=env, stdout=subprocess.DEVNULL)
+          PY
 
-  test_shared:
-    name: flutter-test (shared_package)
-    needs: meta
-    if: needs.meta.outputs.shared_package == '1' || github.event.inputs.only == 'shared_package'
+  purge-logs:
+    name: schedule-log-purge
+    needs: [meta, report]
+    if: always()
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
-          repository: zysicyj-xxc/zysicyj
-          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          ref: ${{ needs.meta.outputs.sha }}
           persist-credentials: false
           fetch-depth: 1
-
-      - name: Read Flutter version
-        id: flutter
-        run: |
-          set -euo pipefail
-          echo "testing sha=$(git rev-parse HEAD)"
-          if [ ! -f .flutter-version ]; then
-            echo "ERROR: missing .flutter-version" >&2
-            exit 1
-          fi
-          ver=$(tr -d '[:space:]' < .flutter-version)
-          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "ERROR: .flutter-version is not X.Y.Z" >&2
-            exit 1
-          fi
-          echo "version=$ver" >> "$GITHUB_OUTPUT"
-          echo "flutter-version=$ver"
-
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: ${{ steps.flutter.outputs.version }}
-          channel: stable
-          cache: true
-
-      - name: flutter pub get and test
-        working-directory: apps/shared_package
-        run: |
-          set -euo pipefail
-          if [ ! -f pubspec.yaml ]; then
-            echo "ERROR: missing apps/shared_package/pubspec.yaml" >&2
-            exit 1
-          fi
-          flutter pub get
-          out="$RUNNER_TEMP/shared-package-test.txt"
-          set +e
-          set +o pipefail
-          flutter test --reporter expanded | tee "$out"
-          rc=${PIPESTATUS[0]}
-          set -o pipefail
-          set -e
-          line=$(grep -E '(^| )[+][0-9]+' "$out" | tail -n 1 || true)
-          cluster=$(printf '%s\n' "$line" | grep -oE '[+][0-9]+( ~[0-9]+)?( -[0-9]+)?' | head -n 1 || true)
-          passed=$(printf '%s' "$cluster" | sed -nE 's/^[+]([0-9]+).*/\1/p')
-          skipped=$(printf '%s' "$cluster" | sed -nE 's/.*~([0-9]+).*/\1/p')
-          failed=$(printf '%s' "$cluster" | sed -nE 's/.*-([0-9]+).*/\1/p')
-          passed=${passed:-0}
-          skipped=${skipped:-0}
-          failed=${failed:-0}
-          rm -f "$out"
-          if [ -z "$cluster" ]; then
-            echo "ERROR: no flutter test summary line" >&2
-            if [ "$rc" -ne 0 ]; then
-              exit "$rc"
-            fi
-            exit 1
-          fi
-          echo "flutter-test summary passed=${passed} skipped=${skipped} failed=${failed}"
-          printf 'passed=%s skipped=%s failed=%s\n' "$passed" "$skipped" "$failed" >> "$GITHUB_STEP_SUMMARY"
-          if [ "$passed" = 0 ] && [ "$skipped" = 0 ] && [ "$failed" = 0 ]; then
-            echo "ERROR: flutter test reported no tests" >&2
-            exit 1
-          fi
-          exit "$rc"
-
-  report_shared:
-    name: post-status (shared_package)
-    needs: [meta, test_shared]
-    if: always() && needs.meta.result == 'success' && (needs.meta.outputs.shared_package == '1' || github.event.inputs.only == 'shared_package')
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Post conclusion
+      - name: Request log purge
         env:
-          SHA: ${{ needs.meta.outputs.sha }}
-          RESULT: ${{ needs.test_shared.result }}
-          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
-            echo "ERROR: sha failed allowlist" >&2
-            exit 1
-          fi
-          case "$RESULT" in
-            success) state=success; desc=success ;;
-            cancelled) state=failure; desc=cancelled ;;
-            *) state=failure; desc=failure ;;
-          esac
-          echo "status flutter-test (shared_package) ${state}"
-          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
-            -f state="$state" \
-            -f target_url="${RUN_URL}" \
-            -f description="$desc" \
-            -f context="flutter-test (shared_package)" >/dev/null
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          DISPATCH_REF: ${{ github.ref_name }}
+        run: bash .github/scripts/request-purge.sh || echo "FAIL purge-request"

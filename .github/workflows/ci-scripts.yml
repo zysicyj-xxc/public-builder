@@ -1,0 +1,194 @@
+# .ci/*.tests.sh and staging-deployer go test for zysicyj-xxc/zysicyj.
+# Needs Node 22 and xz. Tests that fail because user namespaces are
+# unavailable (unshare --user) are skipped. Hosted runners only.
+# Trust boundary: repository_dispatch and workflow_dispatch only.
+# Status context: ci-scripts.
+
+name: CI Scripts
+
+on:
+  repository_dispatch:
+    types: [ci-scripts]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref or SHA of zysicyj-xxc/zysicyj'
+        required: true
+        type: string
+      sha:
+        description: 'Commit SHA for checkout and status (default: resolve ref)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-scripts-${{ github.event.client_payload.sha || github.event.inputs.sha || github.event.client_payload.ref || github.event.inputs.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  meta:
+    name: resolve-payload
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Allowlist ref/sha
+        id: resolve
+        uses: ./.github/actions/resolve-private-ref
+        with:
+          ref: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
+          sha: ${{ github.event.client_payload.sha || github.event.inputs.sha }}
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+      - name: Set pending status
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "FAIL sha" >&2
+            exit 1
+          fi
+          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
+            -f state="pending" \
+            -f target_url="${RUN_URL}" \
+            -f description="running" \
+            -f context="ci-scripts" >/dev/null
+          echo "PASS pending"
+
+  test:
+    name: ci-scripts
+    needs: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.meta.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/checkout@v4
+        with:
+          path: _pb
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.6'
+          cache: false
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.npm
+          key: ci-scripts-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ci-scripts-${{ runner.os }}-
+      - name: Install xz
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq >/dev/null
+          sudo apt-get install -y -qq xz-utils >/dev/null
+          echo "PASS xz"
+      - name: Run ci scripts
+        id: run
+        env:
+          GATE_LOG_KEY: ${{ secrets.GATE_LOG_KEY }}
+          DETAIL_LOG: ${{ runner.temp }}/ci-scripts-detail.log
+        run: bash "$GITHUB_WORKSPACE/_pb/.github/scripts/ci-scripts-run.sh"
+      - name: Encrypt detail log
+        if: failure()
+        env:
+          GATE_LOG_KEY: ${{ secrets.GATE_LOG_KEY }}
+          DETAIL_LOG: ${{ runner.temp }}/ci-scripts-detail.log
+        run: |
+          set -euo pipefail
+          if [ -z "${GATE_LOG_KEY:-}" ] || [ ! -s "${DETAIL_LOG}" ]; then
+            rm -f "${DETAIL_LOG}"
+            echo "SKIP encrypt"
+            exit 0
+          fi
+          mkdir -p "${RUNNER_TEMP}/gate-encrypted"
+          openssl enc -aes-256-cbc -pbkdf2 -iter 100000 -salt \
+            -pass env:GATE_LOG_KEY \
+            -in "${DETAIL_LOG}" \
+            -out "${RUNNER_TEMP}/gate-encrypted/ci-scripts.bin"
+          rm -f "${DETAIL_LOG}"
+          echo "PASS encrypt"
+      - name: Upload encrypted log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-log-${{ github.run_id }}-ci-scripts
+          path: ${{ runner.temp }}/gate-encrypted
+          retention-days: 1
+          if-no-files-found: ignore
+
+  report:
+    name: post-status
+    needs: [meta, test]
+    if: always() && needs.meta.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Post conclusion
+        env:
+          SHA: ${{ needs.meta.outputs.sha }}
+          RESULT: ${{ needs.test.result }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "FAIL sha" >&2
+            exit 1
+          fi
+          case "$RESULT" in
+            success) state=success; desc=success ;;
+            cancelled) state=failure; desc=cancelled ;;
+            *) state=failure; desc=failure ;;
+          esac
+          echo "status ${state}"
+          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
+            -f state="$state" \
+            -f target_url="${RUN_URL}" \
+            -f description="$desc" \
+            -f context="ci-scripts" >/dev/null
+
+  purge-logs:
+    name: schedule-log-purge
+    needs: [meta, report]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Request log purge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          DISPATCH_REF: ${{ github.ref_name }}
+        run: bash .github/scripts/request-purge.sh || echo "FAIL purge-request"

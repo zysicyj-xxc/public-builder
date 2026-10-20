@@ -1,0 +1,261 @@
+# daymica flutter test, 8 shards (0..7), same split as Flutter's
+# --total-shards=8 --shard-index. Runs on ubuntu-latest.
+# Trust boundary: repository_dispatch and workflow_dispatch only.
+# Status context: flutter-test (daymica/<shard>).
+
+name: Daymica Test
+
+on:
+  repository_dispatch:
+    types: [daymica-test]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref or SHA of zysicyj-xxc/zysicyj'
+        required: true
+        type: string
+      sha:
+        description: 'Commit SHA for checkout and status (default: resolve ref)'
+        required: false
+        type: string
+      shards:
+        description: 'Comma list of shards 0-7. Empty runs all eight.'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: daymica-test-${{ github.event.client_payload.sha || github.event.inputs.sha || github.event.client_payload.ref || github.event.inputs.ref }}-${{ github.event.inputs.shards || github.event.client_payload.shards || 'all' }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  meta:
+    name: resolve-payload
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      shards: ${{ steps.pick.outputs.shards }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Allowlist ref/sha
+        id: resolve
+        uses: ./.github/actions/resolve-private-ref
+        with:
+          ref: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
+          sha: ${{ github.event.client_payload.sha || github.event.inputs.sha }}
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+      - name: Pick shards
+        id: pick
+        env:
+          RAW: ${{ github.event.client_payload.shards || github.event.inputs.shards }}
+        run: |
+          set -euo pipefail
+          python3 - "$RAW" <<'PY'
+          import json, os, sys
+          raw = (sys.argv[1] or "").replace(" ", "")
+          if raw == "":
+              shards = [str(i) for i in range(8)]
+          else:
+              if not all(part in list("01234567") and len(part) == 1 for part in raw.split(",")):
+                  sys.exit("FAIL shards")
+              shards = []
+              for part in raw.split(","):
+                  if part and part not in shards:
+                      shards.append(part)
+              if not shards:
+                  sys.exit("FAIL shards")
+          path = os.environ["GITHUB_OUTPUT"]
+          with open(path, "a", encoding="utf-8") as fh:
+              fh.write("shards=" + json.dumps(shards) + "\n")
+          print("PASS shards count=" + str(len(shards)))
+          PY
+      - name: Set pending statuses
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+          SHARDS: ${{ steps.pick.outputs.shards }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "FAIL sha" >&2
+            exit 1
+          fi
+          python3 - "$SHARDS" <<'PY'
+          import json, os, subprocess, sys
+          shards = json.loads(sys.argv[1])
+          sha = os.environ["SHA"]
+          url = os.environ["RUN_URL"]
+          for shard in shards:
+              ctx = f"flutter-test (daymica/{shard})"
+              subprocess.check_call([
+                  "gh", "api", "--method", "POST", f"repos/zysicyj-xxc/zysicyj/statuses/{sha}",
+                  "-f", "state=pending",
+                  "-f", f"target_url={url}",
+                  "-f", "description=running",
+                  "-f", f"context={ctx}",
+              ], stdout=subprocess.DEVNULL)
+          print(f"PASS pending count={len(shards)}")
+          PY
+
+  test:
+    name: flutter-test (daymica/${{ matrix.shard }})
+    needs: meta
+    if: needs.meta.outputs.shards != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.meta.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.meta.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/checkout@v4
+        with:
+          path: _pb
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "FAIL flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "FAIL flutter-version" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ steps.flutter.outputs.version }}
+          channel: stable
+          cache: true
+      - uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-daymica-${{ hashFiles('apps/daymica/pubspec.lock', 'apps/shared_package/pubspec.lock') }}
+          restore-keys: |
+            pub-${{ runner.os }}-daymica-
+      - name: flutter test shard
+        env:
+          GATE_LOG_KEY: ${{ secrets.GATE_LOG_KEY }}
+          QUIET_LABEL: daymica
+          QUIET_KIND: flutter-test
+          SHARD: ${{ matrix.shard }}
+          QUIET_CMD: 'cd apps/daymica && flutter pub get && flutter test --concurrency=2 --total-shards=8 --shard-index="$SHARD" --reporter json'
+        run: bash "$GITHUB_WORKSPACE/_pb/.github/scripts/quiet.sh"
+      - name: Upload encrypted log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-log-${{ github.run_id }}-daymica-${{ matrix.shard }}
+          path: ${{ runner.temp }}/gate-encrypted
+          retention-days: 1
+          if-no-files-found: ignore
+
+  report:
+    name: post-statuses
+    needs: [meta, test]
+    if: always() && needs.meta.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Post conclusions
+        env:
+          SHA: ${{ needs.meta.outputs.sha }}
+          SHARDS: ${{ needs.meta.outputs.shards }}
+          ACTIONS_TOKEN: ${{ github.token }}
+          STATUS_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "FAIL sha" >&2
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json, os, subprocess, time
+          shards = json.loads(os.environ["SHARDS"])
+          contexts = [f"flutter-test (daymica/{shard})" for shard in shards]
+          repo = os.environ["GITHUB_REPOSITORY"]
+          run_id = os.environ["RUN_ID"]
+          sha = os.environ["SHA"]
+          url = os.environ["RUN_URL"]
+          env = dict(os.environ)
+          env["GH_TOKEN"] = os.environ["ACTIONS_TOKEN"]
+          found = {}
+          for _ in range(6):
+              raw = subprocess.check_output([
+                  "gh", "api", "--paginate",
+                  f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100",
+                  "--jq", ".jobs[] | [.name, (.conclusion // \"\")] | @tsv",
+              ], env=env, text=True)
+              found = {}
+              for line in raw.splitlines():
+                  name, _, conclusion = line.partition("\t")
+                  found[name] = conclusion
+              if all(ctx in found for ctx in contexts):
+                  break
+              time.sleep(5)
+          env["GH_TOKEN"] = os.environ["STATUS_TOKEN"]
+          for ctx in contexts:
+              conclusion = found.get(ctx, "")
+              if conclusion == "success":
+                  state, desc = "success", "success"
+              elif conclusion == "cancelled":
+                  state, desc = "failure", "cancelled"
+              else:
+                  state, desc = "failure", "failure"
+              print(f"status {state} {desc}")
+              subprocess.check_call([
+                  "gh", "api", "--method", "POST", f"repos/zysicyj-xxc/zysicyj/statuses/{sha}",
+                  "-f", f"state={state}",
+                  "-f", f"target_url={url}",
+                  "-f", f"description={desc}",
+                  "-f", f"context={ctx}",
+              ], env=env, stdout=subprocess.DEVNULL)
+          PY
+
+  purge-logs:
+    name: schedule-log-purge
+    needs: [meta, report]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Request log purge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          DISPATCH_REF: ${{ github.ref_name }}
+        run: bash .github/scripts/request-purge.sh || echo "FAIL purge-request"

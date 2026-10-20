@@ -81,12 +81,12 @@ jobs:
             local full="$raw"
             if ! printf '%s' "$full" | grep -Eq '^refs/'; then
               if ! printf '%s' "$full" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/-]*$'; then
-                fail "ref failed allowlist: $full"
+                fail "ref failed allowlist"
               fi
               full="refs/heads/$full"
             fi
             case "$full" in
-              *..*) fail "ref failed allowlist: $full" ;;
+              *..*) fail "ref failed allowlist" ;;
             esac
             if printf '%s' "$full" | grep -Eq '^refs/pull/[0-9]+/(head|merge)$'; then
               printf '%s' "$full"
@@ -98,18 +98,18 @@ jobs:
             elif printf '%s' "$full" | grep -Eq '^refs/tags/.+'; then
               rest=${full#refs/tags/}
             else
-              fail "ref failed allowlist: $full"
+              fail "ref failed allowlist"
             fi
             local -a segs=()
             IFS='/' read -r -a segs <<< "$rest"
             local joined s
             joined=$(IFS=/; printf '%s' "${segs[*]}")
             if [ "$joined" != "$rest" ] || [ "${#segs[@]}" -eq 0 ]; then
-              fail "ref failed allowlist: $full"
+              fail "ref failed allowlist"
             fi
             for s in "${segs[@]}"; do
               if ! printf '%s' "$s" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'; then
-                fail "ref failed allowlist: $full"
+                fail "ref failed allowlist"
               fi
             done
             printf '%s' "$full"
@@ -203,7 +203,7 @@ jobs:
             echo "do_website=$DO_W"
             echo "do_flutter=$DO_F"
           } >> "$GITHUB_OUTPUT"
-          echo "OK ref=${REF_NORM:-} sha=$SHA scopes=${SCOPES_NORM:-all} backend=$DO_B website=$DO_W flutter=$DO_F"
+          echo "OK sha=$SHA backend=$DO_B website=$DO_W flutter=$DO_F"
 
       - name: Set pending statuses
         env:
@@ -282,33 +282,33 @@ jobs:
             backend/sql/user_totp_trusted_devices.sql \
             backend/sql/user_app_memberships.sql
           do
-            echo "apply ${f}"
-            docker exec -i -e MYSQL_PWD "$cid" mysql --protocol=TCP -uroot zysicyj_test < "$f"
+            docker exec -i -e MYSQL_PWD "$cid" mysql --protocol=TCP -uroot zysicyj_test < "$f" >/dev/null
           done
+          echo "PASS sql"
+      - uses: actions/checkout@v4
+        with:
+          path: _pb
+          persist-credentials: false
+          fetch-depth: 1
       - name: go build + test
         working-directory: backend
         env:
           # Same query string as scripts/lib/lib-backend-test-db.ps1 local DSN. Port is the mapped 3306.
           TEST_DATABASE_DSN: "root:test@tcp(127.0.0.1:3306)/zysicyj_test?charset=utf8mb4&parseTime=True&loc=Local"
           CLEAN_TEST_DB: "true"
-        run: |
-          set -euo pipefail
-          go build ./...
-          # -p 1: packages share zysicyj_test; CLEAN_TEST_DB races if they run in parallel.
-          go test ./internal/integration/... -count=1 -p 1 -v | tee /tmp/integration.log
-          pass=$(grep -c -- '--- PASS:' /tmp/integration.log || true)
-          skip=$(grep -c -- '--- SKIP:' /tmp/integration.log || true)
-          echo "integration summary PASS=${pass} SKIP=${skip}"
-          if [ "${skip}" -ne 0 ]; then
-            echo "ERROR: integration tests skipped" >&2
-            exit 1
-          fi
-          if [ "${pass}" -lt 1 ]; then
-            echo "ERROR: no integration test passed" >&2
-            exit 1
-          fi
-          mapfile -t pkgs < <(go list ./... | grep -Ev '/internal/integration($|/)')
-          go test "${pkgs[@]}" -count=1 -p 1
+          GATE_LOG_KEY: ${{ secrets.GATE_LOG_KEY }}
+          QUIET_LABEL: backend
+          QUIET_KIND: go-test
+          QUIET_CMD: bash "$GITHUB_WORKSPACE/_pb/.github/scripts/backend-test.sh"
+        run: bash "$GITHUB_WORKSPACE/_pb/.github/scripts/quiet.sh"
+      - name: Upload encrypted log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-log-${{ github.run_id }}-backend
+          path: ${{ runner.temp }}/gate-encrypted
+          retention-days: 1
+          if-no-files-found: ignore
 
   website:
     name: website
@@ -327,14 +327,27 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Enable pnpm
-        run: corepack enable
+      - uses: actions/checkout@v4
+        with:
+          path: _pb
+          persist-credentials: false
+          fetch-depth: 1
       - name: pnpm install + vitest
         working-directory: website
-        run: |
-          set -euo pipefail
-          pnpm install --frozen-lockfile
-          pnpm exec vitest run
+        env:
+          GATE_LOG_KEY: ${{ secrets.GATE_LOG_KEY }}
+          QUIET_LABEL: website
+          QUIET_KIND: generic
+          QUIET_CMD: 'corepack enable && pnpm install --frozen-lockfile && pnpm exec vitest run'
+        run: bash "$GITHUB_WORKSPACE/_pb/.github/scripts/quiet.sh"
+      - name: Upload encrypted log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-log-${{ github.run_id }}-website
+          path: ${{ runner.temp }}/gate-encrypted
+          retention-days: 1
+          if-no-files-found: ignore
 
   flutter:
     name: flutter-analyze
@@ -364,17 +377,28 @@ jobs:
             exit 1
           fi
           echo "version=$ver" >> "$GITHUB_OUTPUT"
-          echo "flutter-version=$ver"
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
+      - uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-analyze-${{ hashFiles('**/pubspec.lock') }}
+          restore-keys: |
+            pub-${{ runner.os }}-analyze-
+      - uses: actions/checkout@v4
+        with:
+          path: _pb
+          persist-credentials: false
+          fetch-depth: 1
       - name: pub get + analyze
+        env:
+          GATE_LOG_KEY: ${{ secrets.GATE_LOG_KEY }}
         run: |
           set -euo pipefail
-          # Former CNB validate-flutter apps, plus shared_package and admin-app.
-          # pub get is serial (shared_package first); analyze is parallel and does not re-run pub.
+          # shared_package first. pub get stays serial; analyze does not re-run pub.
           APPS=(
             apps/shared_package
             apps/daymica
@@ -384,43 +408,58 @@ jobs:
             apps/mail-box
             apps/eye-care
             apps/admin-app
+            apps/water-tracker
           )
+          label_for() {
+            case "$1" in
+              apps/yaoxiaobai/yaoxiaobai_app) printf '%s' yaoxiaobai ;;
+              *) basename "$1" ;;
+            esac
+          }
+          present=()
           for d in "${APPS[@]}"; do
+            label=$(label_for "$d")
             if [ ! -f "${d}/pubspec.yaml" ]; then
-              echo "SKIP pub get ${d}"
+              echo "SKIP ${label}"
               continue
             fi
-            echo "== pub get ${d} =="
-            (cd "${d}" && flutter pub get)
+            QUIET_LABEL="${label}" QUIET_KIND=generic \
+              QUIET_CMD="cd $(printf '%q' "$d") && flutter pub get" \
+              bash "$GITHUB_WORKSPACE/_pb/.github/scripts/quiet.sh"
+            present+=("$d")
           done
+          if [ "${#present[@]}" -eq 0 ]; then
+            echo "FAIL flutter-analyze"
+            exit 1
+          fi
           FAIL=0
           PIDS=()
-          for d in "${APPS[@]}"; do
-            if [ ! -f "${d}/pubspec.yaml" ]; then
-              continue
-            fi
+          for d in "${present[@]}"; do
+            label=$(label_for "$d")
             (
-              set -euo pipefail
-              echo "== analyze ${d} =="
-              cd "${d}"
-              flutter analyze --no-pub --no-fatal-warnings --no-fatal-infos
-              echo "OK: ${d}"
+              QUIET_LABEL="${label}" QUIET_KIND=flutter-analyze \
+                QUIET_CMD="cd $(printf '%q' "$d") && flutter analyze --no-pub --no-fatal-warnings --no-fatal-infos" \
+                bash "$GITHUB_WORKSPACE/_pb/.github/scripts/quiet.sh"
             ) &
             PIDS+=("$!")
           done
-          if [ "${#PIDS[@]}" -eq 0 ]; then
-            echo "ERROR: no Flutter packages found to analyze" >&2
-            exit 1
-          fi
           for pid in "${PIDS[@]}"; do
             if ! wait "${pid}"; then
               FAIL=1
             fi
           done
           if [ "${FAIL}" -ne 0 ]; then
-            echo "ERROR: at least one Flutter analyze failed" >&2
+            echo "FAIL flutter-analyze"
             exit 1
           fi
+      - name: Upload encrypted log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-log-${{ github.run_id }}-flutter-analyze
+          path: ${{ runner.temp }}/gate-encrypted
+          retention-days: 1
+          if-no-files-found: ignore
 
   backend-status:
     name: status backend
@@ -514,3 +553,24 @@ jobs:
             -f target_url="${RUN_URL}" \
             -f description="${DESC}" \
             -f context="quality/flutter-analyze" >/dev/null
+
+  purge-logs:
+    name: schedule-log-purge
+    needs: [meta, backend-status, website-status, flutter-status]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Request log purge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          DISPATCH_REF: ${{ github.ref_name }}
+        run: bash .github/scripts/request-purge.sh || echo "FAIL purge-request"

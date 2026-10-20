@@ -25,6 +25,11 @@ on:
         description: 'Commit SHA for checkout and status (default: resolve ref)'
         required: false
         type: string
+      scopes:
+        description: 'Comma list: export-diff,easy-script,bookmark-collector,blog-sync,daymica-capture. Empty runs all.'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -46,6 +51,7 @@ jobs:
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
       ref: ${{ steps.resolve.outputs.ref }}
+      scopes: ${{ steps.pick.outputs.scopes }}
     steps:
       - name: Checkout public-builder
         uses: actions/checkout@v4
@@ -58,29 +64,61 @@ jobs:
           sha: ${{ github.event.client_payload.sha || github.event.inputs.sha }}
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
 
+      - name: Pick scopes
+        id: pick
+        env:
+          RAW: ${{ github.event.client_payload.scopes || github.event.inputs.scopes }}
+        run: |
+          set -euo pipefail
+          python3 - "$RAW" <<'PY'
+          import os, sys
+          order = ["export-diff", "easy-script", "bookmark-collector", "blog-sync", "daymica-capture"]
+          raw = (sys.argv[1] or "").replace(" ", "")
+          if raw == "":
+              scopes = order
+          else:
+              scopes = []
+              for part in raw.split(","):
+                  if not part:
+                      continue
+                  if part not in order:
+                      sys.exit("FAIL scopes")
+                  if part not in scopes:
+                      scopes.append(part)
+              if not scopes:
+                  sys.exit("FAIL scopes")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write("scopes= " + " ".join(scopes) + " \n")
+          print("PASS scopes count=" + str(len(scopes)))
+          PY
+
       - name: Set pending statuses
         env:
           SHA: ${{ steps.resolve.outputs.sha }}
+          SCOPES: ${{ steps.pick.outputs.scopes }}
           GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
-            echo "ERROR: sha failed allowlist" >&2
+            echo "FAIL sha" >&2
             exit 1
           fi
           post() {
             gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
               -f state="pending" \
               -f target_url="${RUN_URL}" \
-              -f description="running on public-builder" \
+              -f description="running" \
               -f context="$1" >/dev/null
           }
-          post "export-diff"
-          post "gate (easy-script)"
-          post "gate (bookmark-collector)"
-          post "gate (blog-sync)"
-          post "gate (daymica-capture)"
+          for scope in ${SCOPES}; do
+            case "$scope" in
+              export-diff) post "export-diff" ;;
+              easy-script|bookmark-collector|blog-sync|daymica-capture) post "gate (${scope})" ;;
+              *) echo "FAIL scopes" >&2; exit 1 ;;
+            esac
+          done
+          echo "PASS pending"
 
       - name: Post failure when resolve fails
         if: failure()
@@ -116,6 +154,7 @@ jobs:
   export-diff:
     name: export-diff
     needs: meta
+    if: contains(needs.meta.outputs.scopes, ' export-diff ')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -146,18 +185,29 @@ jobs:
           flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
+      - uses: actions/checkout@v4
+        with:
+          path: _pb
+          persist-credentials: false
+          fetch-depth: 1
       - name: regenerate tokens and diff utools
-        run: |
-          set -euo pipefail
-          cd apps/shared_package
-          flutter pub get
-          flutter test test/tokens/web_token_export_test.dart
-          cd ../..
-          git diff --exit-code -- apps/shared_package/generated utools
+        env:
+          GATE_LOG_KEY: ${{ secrets.GATE_LOG_KEY }}
+          QUIET_LABEL: export-diff
+          QUIET_KIND: generic
+          QUIET_CMD: |
+            set -euo pipefail
+            cd apps/shared_package
+            flutter pub get
+            flutter test --concurrency=2 --reporter json test/tokens/web_token_export_test.dart
+            cd ../..
+            git diff --exit-code -- apps/shared_package/generated utools
+        run: bash "$GITHUB_WORKSPACE/_pb/.github/scripts/quiet.sh"
 
   gate:
     name: gate (${{ matrix.plugin }})
     needs: meta
+    if: contains(needs.meta.outputs.scopes, format(' {0} ', matrix.plugin))
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -179,32 +229,37 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - uses: actions/checkout@v4
+        with:
+          path: _pb
+          persist-credentials: false
+          fetch-depth: 1
       - name: pnpm test
         env:
           PLUGIN: ${{ matrix.plugin }}
-        run: |
-          set -euo pipefail
-          case "$PLUGIN" in
-            easy-script|bookmark-collector|blog-sync|daymica-capture) ;;
-            *) echo "ERROR: plugin not allowlisted" >&2; exit 1 ;;
-          esac
-          dir="utools/${PLUGIN}"
-          if [ ! -f "${dir}/package.json" ]; then
-            echo "ERROR: missing ${dir}/package.json" >&2
-            exit 1
-          fi
-          corepack enable
-          if [ -f "${dir}/pnpm-lock.yaml" ]; then
-            cd "${dir}"
-            pnpm install --frozen-lockfile
-            pnpm test
-          elif [ -f utools/pnpm-lock.yaml ]; then
-            pnpm install --frozen-lockfile --dir utools
-            pnpm --dir "${dir}" test
-          else
-            echo "ERROR: no pnpm-lock.yaml for ${dir}" >&2
-            exit 1
-          fi
+          GATE_LOG_KEY: ${{ secrets.GATE_LOG_KEY }}
+          QUIET_LABEL: ${{ matrix.plugin }}
+          QUIET_KIND: generic
+          QUIET_CMD: |
+            set -euo pipefail
+            case "$PLUGIN" in
+              easy-script|bookmark-collector|blog-sync|daymica-capture) ;;
+              *) exit 1 ;;
+            esac
+            dir="utools/${PLUGIN}"
+            test -f "${dir}/package.json"
+            corepack enable
+            if [ -f "${dir}/pnpm-lock.yaml" ]; then
+              cd "${dir}"
+              pnpm install --frozen-lockfile
+              pnpm test
+            elif [ -f utools/pnpm-lock.yaml ]; then
+              pnpm install --frozen-lockfile --dir utools
+              pnpm --dir "${dir}" test
+            else
+              exit 1
+            fi
+        run: bash "$GITHUB_WORKSPACE/_pb/.github/scripts/quiet.sh"
 
   report:
     name: post-statuses
@@ -220,6 +275,7 @@ jobs:
           STATUS_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           RUN_ID: ${{ github.run_id }}
+          SCOPES: ${{ needs.meta.outputs.scopes }}
         run: |
           set -euo pipefail
           if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
@@ -227,13 +283,14 @@ jobs:
             exit 1
           fi
           declare -A conc=()
-          contexts=(
-            "export-diff"
-            "gate (easy-script)"
-            "gate (bookmark-collector)"
-            "gate (blog-sync)"
-            "gate (daymica-capture)"
-          )
+          contexts=()
+          for scope in ${SCOPES}; do
+            case "$scope" in
+              export-diff) contexts+=("export-diff") ;;
+              easy-script|bookmark-collector|blog-sync|daymica-capture) contexts+=("gate (${scope})") ;;
+              *) echo "FAIL scopes" >&2; exit 1 ;;
+            esac
+          done
           for attempt in 1 2 3 4 5 6; do
             conc=()
             while IFS=$'\t' read -r name conclusion; do
@@ -275,3 +332,24 @@ jobs:
           for ctx in "${contexts[@]}"; do
             post "$ctx" "${conc[$ctx]:-}"
           done
+
+  purge-logs:
+    name: schedule-log-purge
+    needs: [meta, report]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Request log purge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          DISPATCH_REF: ${{ github.ref_name }}
+        run: bash .github/scripts/request-purge.sh || echo "FAIL purge-request"

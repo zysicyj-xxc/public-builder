@@ -29,6 +29,11 @@ on:
         description: 'Commit SHA for checkout and status (default: resolve ref)'
         required: false
         type: string
+      only:
+        description: 'Comma list of apps plus golden. Empty runs every visual check.'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -50,6 +55,7 @@ jobs:
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
       ref: ${{ steps.resolve.outputs.ref }}
+      run_apps: ${{ steps.pick.outputs.run_apps }}
     steps:
       - name: Checkout public-builder
         uses: actions/checkout@v4
@@ -62,9 +68,38 @@ jobs:
           sha: ${{ github.event.client_payload.sha || github.event.inputs.sha }}
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
 
+      - name: Pick checks
+        id: pick
+        env:
+          RAW: ${{ github.event.client_payload.only || github.event.inputs.only }}
+        run: |
+          set -euo pipefail
+          python3 - "$RAW" <<'PY'
+          import os, sys
+          order = ["mail-box", "password-vault", "eye-care", "footprint", "yaoxiaobai", "daymica", "water-tracker", "golden"]
+          raw = (sys.argv[1] or "").replace(" ", "")
+          if raw == "":
+              apps = order
+          else:
+              apps = []
+              for part in raw.split(","):
+                  if not part:
+                      continue
+                  if part not in order:
+                      sys.exit("FAIL apps")
+                  if part not in apps:
+                      apps.append(part)
+              if not apps:
+                  sys.exit("FAIL apps")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write("run_apps= " + " ".join(apps) + " \n")
+          print("PASS apps count=" + str(len(apps)))
+          PY
+
       - name: Set pending statuses
         env:
           SHA: ${{ steps.resolve.outputs.sha }}
+          RUN_APPS: ${{ steps.pick.outputs.run_apps }}
           GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -77,17 +112,19 @@ jobs:
             gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
               -f state="pending" \
               -f target_url="${RUN_URL}" \
-              -f description="running on public-builder" \
+              -f description="running" \
               -f context="$1" >/dev/null
           }
-          post "visual-lint (mail-box)"
-          post "visual-lint (password-vault)"
-          post "visual-lint (eye-care)"
-          post "visual-lint (footprint)"
-          post "visual-lint (yaoxiaobai)"
-          post "visual-lint (daymica)"
-          post "visual-lint (water-tracker)"
-          post "golden-tests (shared_package)"
+          for app in ${RUN_APPS}; do
+            case "$app" in
+              mail-box|password-vault|eye-care|footprint|yaoxiaobai|daymica|water-tracker)
+                post "visual-lint (${app})"
+                ;;
+              golden) post "golden-tests (shared_package)" ;;
+              *) echo "FAIL apps" >&2; exit 1 ;;
+            esac
+          done
+          echo "PASS pending"
 
       - name: Post failure when resolve fails
         if: failure()
@@ -126,6 +163,7 @@ jobs:
   lint:
     name: visual-lint (${{ matrix.app }})
     needs: meta
+    if: contains(needs.meta.outputs.run_apps, format(' {0} ', matrix.app))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -167,60 +205,70 @@ jobs:
           flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
+      - uses: actions/checkout@v4
+        with:
+          path: _pb
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-visual-${{ matrix.app }}-${{ hashFiles(format('apps/{0}/pubspec.lock', matrix.app)) }}
+          restore-keys: |
+            pub-${{ runner.os }}-visual-${{ matrix.app }}-
       - name: visual_lint
         env:
           APP: ${{ matrix.app }}
-        run: |
-          set -euo pipefail
-          case "$APP" in
-            mail-box) dir=apps/mail-box ;;
-            password-vault) dir=apps/password-vault ;;
-            eye-care) dir=apps/eye-care ;;
-            footprint) dir=apps/footprint ;;
-            yaoxiaobai) dir=apps/yaoxiaobai/yaoxiaobai_app ;;
-            daymica) dir=apps/daymica ;;
-            water-tracker) dir=apps/water-tracker ;;
-            *) echo "ERROR: app not allowlisted" >&2; exit 1 ;;
-          esac
-          if [ ! -f "${dir}/pubspec.yaml" ]; then
-            echo "ERROR: missing ${dir}/pubspec.yaml" >&2
-            exit 1
-          fi
-          cd "${dir}"
-          flutter pub get
-          if grep -q 'visual_lint' pubspec.yaml; then
-            dart run custom_lint
-          else
-            echo "no visual_lint dependency; checking lib/*.dart and pubspec.yaml"
-            if [ ! -d lib ]; then
-              echo "ERROR: missing ${dir}/lib" >&2
-              exit 1
+          GATE_LOG_KEY: ${{ secrets.GATE_LOG_KEY }}
+          QUIET_LABEL: ${{ matrix.app }}
+          QUIET_KIND: generic
+          QUIET_CMD: |
+            set -euo pipefail
+            case "$APP" in
+              mail-box) dir=apps/mail-box ;;
+              password-vault) dir=apps/password-vault ;;
+              eye-care) dir=apps/eye-care ;;
+              footprint) dir=apps/footprint ;;
+              yaoxiaobai) dir=apps/yaoxiaobai/yaoxiaobai_app ;;
+              daymica) dir=apps/daymica ;;
+              water-tracker) dir=apps/water-tracker ;;
+              *) exit 1 ;;
+            esac
+            test -f "${dir}/pubspec.yaml"
+            cd "${dir}"
+            flutter pub get
+            if grep -q 'visual_lint' pubspec.yaml; then
+              dart run custom_lint
+            else
+              test -d lib
+              hit=0
+              if grep -R -n --include='*.dart' 'package:shadcn_ui' lib >/dev/null; then
+                hit=1
+              fi
+              if awk '
+                /^[^[:space:]#]/ { sec=$1; sub(/:.*/, "", sec); next }
+                /^[[:space:]]*#/ { next }
+                (sec=="dependencies" || sec=="dev_dependencies") && /^[[:space:]]*shadcn_ui:/ { found=1 }
+                END { exit(found ? 0 : 1) }
+              ' pubspec.yaml; then
+                hit=1
+              fi
+              test "$hit" -eq 0
             fi
-            hit=0
-            if grep -R -n --include='*.dart' 'package:shadcn_ui' lib; then
-              echo "ERROR: code hit: package:shadcn_ui import in lib/*.dart" >&2
-              hit=1
-            fi
-            pubspec_hits=$(awk '
-              /^[^[:space:]#]/ { sec=$1; sub(/:.*/, "", sec); next }
-              /^[[:space:]]*#/ { next }
-              (sec=="dependencies" || sec=="dev_dependencies") && /^[[:space:]]*shadcn_ui:/ {
-                printf "pubspec.yaml:%d:%s\n", NR, $0
-              }
-            ' pubspec.yaml)
-            if [ -n "$pubspec_hits" ]; then
-              printf '%s\n' "$pubspec_hits"
-              echo "ERROR: pubspec hit: shadcn_ui: key in dependencies or dev_dependencies" >&2
-              hit=1
-            fi
-            if [ "$hit" -ne 0 ]; then
-              exit 1
-            fi
-          fi
+        run: bash "$GITHUB_WORKSPACE/_pb/.github/scripts/quiet.sh"
+      - name: Upload encrypted log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-log-${{ github.run_id }}-visual-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/gate-encrypted
+          retention-days: 1
+          if-no-files-found: ignore
 
   golden:
     name: golden-tests (shared_package)
     needs: meta
+    if: contains(needs.meta.outputs.run_apps, ' golden ')
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -251,18 +299,38 @@ jobs:
           flutter-version: ${{ steps.flutter.outputs.version }}
           channel: 'stable'
           cache: true
+      - uses: actions/checkout@v4
+        with:
+          path: _pb
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-golden-${{ hashFiles('apps/shared_package/pubspec.lock') }}
+          restore-keys: |
+            pub-${{ runner.os }}-golden-
       - name: golden tests
-        run: |
-          set -euo pipefail
-          cd apps/shared_package
-          flutter pub get
-          mapfile -t files < <(grep -R -l -E 'matchesGoldenFile|testGoldens|goldenFileComparator' test --include='*_test.dart' || true)
-          if [ "${#files[@]}" -eq 0 ]; then
-            echo "ERROR: no golden tests under apps/shared_package/test" >&2
-            exit 1
-          fi
-          printf 'golden: %s\n' "${files[@]}"
-          flutter test "${files[@]}"
+        env:
+          GATE_LOG_KEY: ${{ secrets.GATE_LOG_KEY }}
+          QUIET_LABEL: golden
+          QUIET_KIND: flutter-test
+          QUIET_CMD: |
+            set -euo pipefail
+            cd apps/shared_package
+            flutter pub get
+            mapfile -t files < <(grep -R -l -E 'matchesGoldenFile|testGoldens|goldenFileComparator' test --include='*_test.dart' || true)
+            test "${#files[@]}" -gt 0
+            flutter test --concurrency=2 --reporter json "${files[@]}"
+        run: bash "$GITHUB_WORKSPACE/_pb/.github/scripts/quiet.sh"
+      - name: Upload encrypted log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-log-${{ github.run_id }}-golden
+          path: ${{ runner.temp }}/gate-encrypted
+          retention-days: 1
+          if-no-files-found: ignore
 
   report:
     name: post-statuses
@@ -278,6 +346,7 @@ jobs:
           STATUS_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           RUN_ID: ${{ github.run_id }}
+          RUN_APPS: ${{ needs.meta.outputs.run_apps }}
         run: |
           set -euo pipefail
           if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
@@ -285,16 +354,16 @@ jobs:
             exit 1
           fi
           declare -A conc=()
-          contexts=(
-            "visual-lint (mail-box)"
-            "visual-lint (password-vault)"
-            "visual-lint (eye-care)"
-            "visual-lint (footprint)"
-            "visual-lint (yaoxiaobai)"
-            "visual-lint (daymica)"
-            "visual-lint (water-tracker)"
-            "golden-tests (shared_package)"
-          )
+          contexts=()
+          for app in ${RUN_APPS}; do
+            case "$app" in
+              mail-box|password-vault|eye-care|footprint|yaoxiaobai|daymica|water-tracker)
+                contexts+=("visual-lint (${app})")
+                ;;
+              golden) contexts+=("golden-tests (shared_package)") ;;
+              *) echo "FAIL apps" >&2; exit 1 ;;
+            esac
+          done
           for attempt in 1 2 3 4 5 6; do
             conc=()
             while IFS=$'\t' read -r name conclusion; do
@@ -336,3 +405,24 @@ jobs:
           for ctx in "${contexts[@]}"; do
             post "$ctx" "${conc[$ctx]:-}"
           done
+
+  purge-logs:
+    name: schedule-log-purge
+    needs: [meta, report]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Request log purge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          DISPATCH_REF: ${{ github.ref_name }}
+        run: bash .github/scripts/request-purge.sh || echo "FAIL purge-request"

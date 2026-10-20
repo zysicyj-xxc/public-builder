@@ -9,6 +9,8 @@
 # flutter test, not bare dart run) and fails if generated/ or utools/ drifts.
 # gate (<plugin>) runs pnpm test, the command used by the private utools-test workflow.
 # Node 22, Flutter version from the private repo .flutter-version.
+# The gate matrix is meta's JSON plugin list. Job-level if cannot read matrix.
+# export-diff stays a separate job.
 
 name: uTools Visual
 
@@ -51,6 +53,7 @@ jobs:
       sha: ${{ steps.resolve.outputs.sha }}
       ref: ${{ steps.resolve.outputs.ref }}
       scopes: ${{ steps.pick.outputs.scopes }}
+      plugins: ${{ steps.pick.outputs.plugins }}
     steps:
       - name: Checkout public-builder
         uses: actions/checkout@v4
@@ -70,7 +73,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 - "$RAW" <<'PY'
-          import os, sys
+          import json, os, sys
           order = ["export-diff", "easy-script", "bookmark-collector", "blog-sync", "daymica-capture"]
           raw = (sys.argv[1] or "").replace(" ", "")
           if raw == "":
@@ -86,8 +89,10 @@ jobs:
                       scopes.append(part)
               if not scopes:
                   sys.exit("FAIL scopes")
+          plugins = [scope for scope in scopes if scope != "export-diff"]
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
               fh.write("scopes= " + " ".join(scopes) + " \n")
+              fh.write("plugins=" + json.dumps(plugins, separators=(",", ":")) + "\n")
           print("PASS scopes count=" + str(len(scopes)))
           PY
 
@@ -206,17 +211,13 @@ jobs:
   gate:
     name: gate (${{ matrix.plugin }})
     needs: meta
-    if: contains(needs.meta.outputs.scopes, format(' {0} ', matrix.plugin))
+    if: needs.meta.result == 'success' && needs.meta.outputs.plugins != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        plugin:
-          - easy-script
-          - bookmark-collector
-          - blog-sync
-          - daymica-capture
+        plugin: ${{ fromJSON(needs.meta.outputs.plugins) }}
     steps:
       - uses: actions/checkout@v4
         with:

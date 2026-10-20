@@ -3,10 +3,11 @@
 # Allowlist ref/sha before any API call. Status posts run in a separate job so
 # PRIVATE_REPO_ACCESS_TOKEN is not on the runner that executes private-repo code.
 #
-# One job per package posts its own i18n-gate (<app>) status. The job runs
+# One job per selected package posts its own i18n-gate (<app>) status. The job runs
 # `flutter pub get` then `flutter test --no-pub test/l10n` in that package.
-# A package with no test/l10n is skipped. This workflow does not call
-# scripts/ci-verify-l10n-gates.ps1 (local and pre-push still do).
+# A package with no test/l10n is skipped and still reported as success.
+# This workflow does not call scripts/ci-verify-l10n-gates.ps1 (local and pre-push still do).
+# The verify matrix is meta's JSON include. Job-level if cannot read matrix.
 # Fresh checkouts have no package_config, so pub get runs before flutter test.
 # Flutter version comes from the private repo .flutter-version.
 
@@ -51,6 +52,7 @@ jobs:
       sha: ${{ steps.resolve.outputs.sha }}
       ref: ${{ steps.resolve.outputs.ref }}
       run_apps: ${{ steps.pick.outputs.run_apps }}
+      include: ${{ steps.pick.outputs.include }}
     steps:
       - name: Checkout public-builder
         uses: actions/checkout@v4
@@ -70,11 +72,22 @@ jobs:
         run: |
           set -euo pipefail
           python3 - "$RAW" <<'PY'
-          import os, sys
+          import json, os, sys
           order = [
               "daymica", "mail-box", "password-vault", "yaoxiaobai", "eye-care",
               "footprint", "water-tracker", "admin-app", "shared_package",
           ]
+          dirs = {
+              "daymica": "apps/daymica",
+              "mail-box": "apps/mail-box",
+              "password-vault": "apps/password-vault",
+              "yaoxiaobai": "apps/yaoxiaobai/yaoxiaobai_app",
+              "eye-care": "apps/eye-care",
+              "footprint": "apps/footprint",
+              "water-tracker": "apps/water-tracker",
+              "admin-app": "apps/admin-app",
+              "shared_package": "apps/shared_package",
+          }
           raw = (sys.argv[1] or "").replace(" ", "")
           if raw == "":
               apps = order
@@ -89,8 +102,10 @@ jobs:
                       apps.append(part)
               if not apps:
                   sys.exit("FAIL apps")
+          include = [{"app": app, "dir": dirs[app]} for app in apps]
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
               fh.write("run_apps= " + " ".join(apps) + " \n")
+              fh.write("include=" + json.dumps(include, separators=(",", ":")) + "\n")
           print("PASS apps count=" + str(len(apps)))
           PY
 
@@ -161,31 +176,13 @@ jobs:
   verify:
     name: i18n-gate (${{ matrix.app }})
     needs: meta
-    if: contains(needs.meta.outputs.run_apps, format(' {0} ', matrix.app))
+    if: needs.meta.result == 'success' && needs.meta.outputs.include != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - app: daymica
-            dir: apps/daymica
-          - app: mail-box
-            dir: apps/mail-box
-          - app: password-vault
-            dir: apps/password-vault
-          - app: yaoxiaobai
-            dir: apps/yaoxiaobai/yaoxiaobai_app
-          - app: eye-care
-            dir: apps/eye-care
-          - app: footprint
-            dir: apps/footprint
-          - app: water-tracker
-            dir: apps/water-tracker
-          - app: admin-app
-            dir: apps/admin-app
-          - app: shared_package
-            dir: apps/shared_package
+        include: ${{ fromJSON(needs.meta.outputs.include) }}
     steps:
       - uses: actions/checkout@v4
         with:

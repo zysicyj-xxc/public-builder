@@ -13,6 +13,8 @@
 #     (a comment line that mentions shadcn_ui does not count)
 #   golden-tests: flutter test files under apps/shared_package that call matchesGoldenFile
 # Flutter version comes from the private repo .flutter-version, matching build-private / quality-analyze.
+# The lint matrix is meta's JSON app list. Job-level if cannot read matrix.
+# golden stays a separate job; its name is still golden-tests (shared_package).
 
 name: Visual Lint
 
@@ -55,6 +57,7 @@ jobs:
       sha: ${{ steps.resolve.outputs.sha }}
       ref: ${{ steps.resolve.outputs.ref }}
       run_apps: ${{ steps.pick.outputs.run_apps }}
+      lint_apps: ${{ steps.pick.outputs.lint_apps }}
     steps:
       - name: Checkout public-builder
         uses: actions/checkout@v4
@@ -74,7 +77,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 - "$RAW" <<'PY'
-          import os, sys
+          import json, os, sys
           order = ["mail-box", "password-vault", "eye-care", "footprint", "yaoxiaobai", "daymica", "water-tracker", "golden"]
           raw = (sys.argv[1] or "").replace(" ", "")
           if raw == "":
@@ -90,8 +93,10 @@ jobs:
                       apps.append(part)
               if not apps:
                   sys.exit("FAIL apps")
+          lint_apps = [app for app in apps if app != "golden"]
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
               fh.write("run_apps= " + " ".join(apps) + " \n")
+              fh.write("lint_apps=" + json.dumps(lint_apps, separators=(",", ":")) + "\n")
           print("PASS apps count=" + str(len(apps)))
           PY
 
@@ -162,20 +167,13 @@ jobs:
   lint:
     name: visual-lint (${{ matrix.app }})
     needs: meta
-    if: contains(needs.meta.outputs.run_apps, format(' {0} ', matrix.app))
+    if: needs.meta.result == 'success' && needs.meta.outputs.lint_apps != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        app:
-          - mail-box
-          - password-vault
-          - eye-care
-          - footprint
-          - yaoxiaobai
-          - daymica
-          - water-tracker
+        app: ${{ fromJSON(needs.meta.outputs.lint_apps) }}
     steps:
       - uses: actions/checkout@v4
         with:

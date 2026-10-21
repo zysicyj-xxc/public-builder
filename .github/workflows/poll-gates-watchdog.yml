@@ -1,7 +1,8 @@
 # Fail when poll-private-gates.yml has not started a run in 30 minutes.
-# Dispatch that workflow once with the default token, then open or update
-# one fixed-title issue. No extra credentials.
-# When that run is fresh and the issue is open, comment once and close it.
+# schedule and workflow_dispatch run the same check. An outside timer
+# may call workflow_dispatch; this file does not define that timer.
+# Stale: fail, open or update one issue, and dispatch the poll once.
+# Fresh: comment, then close that issue. No extra credentials.
 # Trust boundary: schedule and workflow_dispatch only. No pull_request.
 # Script stdout is only PASS or FAIL.
 
@@ -47,3 +48,27 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           DISPATCH_REF: ${{ github.ref_name }}
         run: bash .github/scripts/poll-gates-watchdog.sh
+
+  purge-logs:
+    name: schedule-log-purge
+    needs: watch
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      # actions/checkout v4.4.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Request log purge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          DISPATCH_REF: ${{ github.ref_name }}
+        run: >-
+          bash .github/scripts/request-purge.sh
+          || echo "FAIL purge-request"

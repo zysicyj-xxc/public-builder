@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Fail when poll-private-gates.yml has not started a run in 30 minutes.
-# Dispatch that workflow once, then open or update one fixed-title issue.
+# schedule and workflow_dispatch share this path. An outside timer may
+# call workflow_dispatch; this script does not branch on that event.
+# Dispatch the poll once, then open or update one fixed-title issue.
 # When the latest run is fresh and that issue is open, comment once and close it.
 # stdout is only PASS or FAIL lines. No refs, tags, URLs, or tokens.
 set -euo pipefail
@@ -224,6 +226,31 @@ selftest() {
     echo "FAIL selftest-trigger"
     exit 1
   fi
+  if ! grep -Fq 'workflow_dispatch:' "$wf_dir/poll-gates-watchdog.yml"; then
+    echo "FAIL selftest-dispatch"
+    exit 1
+  fi
+  if grep -Fq 'github.event_name' "$wf_dir/poll-gates-watchdog.yml"; then
+    echo "FAIL selftest-dispatch"
+    exit 1
+  fi
+  if ! grep -Fq 'bash .github/scripts/poll-gates-watchdog.sh' \
+    "$wf_dir/poll-gates-watchdog.yml"; then
+    echo "FAIL selftest-dispatch"
+    exit 1
+  fi
+  if ! grep -Fq 'request-purge.sh' "$wf_dir/poll-gates-watchdog.yml"; then
+    echo "FAIL selftest-purge-request"
+    exit 1
+  fi
+  if ! grep -Fq 'if: always()' "$wf_dir/poll-gates-watchdog.yml"; then
+    echo "FAIL selftest-purge-request"
+    exit 1
+  fi
+  if awk '/^selftest\(\)/ { exit } { print }' "$0" | grep -Eq 'GITHUB_EVENT_NAME|github\.event_name'; then
+    echo "FAIL selftest-dispatch"
+    exit 1
+  fi
   if ! grep -Fq 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262' \
     "$wf_dir/poll-gates-watchdog.yml"; then
     echo "FAIL selftest-pin"
@@ -383,6 +410,7 @@ EOF
     (
       hash -r
       export PATH="$TEST_DIR:$PATH"
+      export GITHUB_EVENT_NAME=workflow_dispatch
       main
     ) >"$TEST_OUT" 2>"$TEST_ERR"
     TEST_RC=$?

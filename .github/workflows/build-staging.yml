@@ -170,6 +170,7 @@ jobs:
       - name: Read Flutter version
         if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
         id: flutter
+        shell: bash
         run: |
           set -euo pipefail
           if [ ! -f .flutter-version ]; then
@@ -419,6 +420,7 @@ jobs:
       - name: Read Flutter version
         if: contains(needs.guard.outputs.apps, format(',{0},', matrix.app))
         id: flutter
+        shell: bash
         run: |
           set -euo pipefail
           if [ ! -f .flutter-version ]; then

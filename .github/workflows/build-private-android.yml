@@ -154,6 +154,7 @@ jobs:
           java-version: '21'
       - name: Read Flutter version
         id: flutter
+        shell: bash
         run: |
           set -euo pipefail
           if [ ! -f .flutter-version ]; then
@@ -253,6 +254,7 @@ jobs:
           python-version: '3.12'
       - name: Read Flutter version
         id: flutter
+        shell: bash
         run: |
           set -euo pipefail
           if [ ! -f .flutter-version ]; then
@@ -360,6 +362,7 @@ jobs:
           java-version: '17'
       - name: Read Flutter version
         id: flutter
+        shell: bash
         run: |
           set -euo pipefail
           if [ ! -f .flutter-version ]; then
@@ -445,6 +448,7 @@ jobs:
           java-version: '17'
       - name: Read Flutter version
         id: flutter
+        shell: bash
         run: |
           set -euo pipefail
           if [ ! -f .flutter-version ]; then
@@ -529,6 +533,7 @@ jobs:
           java-version: '17'
       - name: Read Flutter version
         id: flutter
+        shell: bash
         run: |
           set -euo pipefail
           if [ ! -f .flutter-version ]; then
@@ -615,6 +620,7 @@ jobs:
           java-version: '17'
       - name: Read Flutter version
         id: flutter
+        shell: bash
         run: |
           set -euo pipefail
           if [ ! -f .flutter-version ]; then
@@ -707,6 +713,7 @@ jobs:
           python-version: '3.12'
       - name: Read Flutter version
         id: flutter
+        shell: bash
         run: |
           set -euo pipefail
           if [ ! -f .flutter-version ]; then
@@ -805,6 +812,7 @@ jobs:
           java-version: '17'
       - name: Read Flutter version
         id: flutter
+        shell: bash
         run: |
           set -euo pipefail
           if [ ! -f .flutter-version ]; then
@@ -891,6 +899,7 @@ jobs:
           java-version: '17'
       - name: Read Flutter version
         id: flutter
+        shell: bash
         run: |
           set -euo pipefail
           if [ ! -f .flutter-version ]; then
@@ -987,6 +996,7 @@ jobs:
           python-version: '3.12'
       - name: Read Flutter version
         id: flutter
+        shell: bash
         run: |
           set -euo pipefail
           if [ ! -f .flutter-version ]; then
@@ -1094,6 +1104,7 @@ jobs:
           python-version: '3.12'
       - name: Read Flutter version
         id: flutter
+        shell: bash
         run: |
           set -euo pipefail
           if [ ! -f .flutter-version ]; then
@@ -1201,6 +1212,7 @@ jobs:
           python-version: '3.12'
       - name: Read Flutter version
         id: flutter
+        shell: bash
         run: |
           set -euo pipefail
           if [ ! -f .flutter-version ]; then
@@ -1308,6 +1320,7 @@ jobs:
           python-version: '3.12'
       - name: Read Flutter version
         id: flutter
+        shell: bash
         run: |
           set -euo pipefail
           if [ ! -f .flutter-version ]; then
@@ -1409,6 +1422,7 @@ jobs:
           java-version: '17'
       - name: Read Flutter version
         id: flutter
+        shell: bash
         run: |
           set -euo pipefail
           if [ ! -f .flutter-version ]; then
@@ -1501,6 +1515,7 @@ jobs:
           python-version: '3.12'
       - name: Read Flutter version
         id: flutter
+        shell: bash
         run: |
           set -euo pipefail
           if [ ! -f .flutter-version ]; then

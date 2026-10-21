@@ -11,6 +11,11 @@
 # uses pnpm test. Hosted checkout has package.json and often no pnpm-lock.yaml
 # under the plugin or utools/, so the installer also accepts a plugin
 # package-lock.json, a repo-root pnpm-lock.yaml, or an install from package.json.
+# Before install, the runner rewrites private CNB npm tarball URLs in the
+# working-copy lockfiles to https://registry.npmjs.org/. That rewrite is not
+# committed, and raw URLs are not logged.
+# A plugin with no scripts.test stays in the matrix, including daymica-capture.
+# The job exits 0 and the status description is "SKIP test no-script".
 # Node 22, Flutter version from the private repo .flutter-version.
 # The gate matrix is meta's JSON plugin list. Job-level if cannot read matrix.
 # export-diff stays a separate job.
@@ -238,13 +243,30 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
       - name: pnpm test
+        id: gate
         env:
           PLUGIN: ${{ matrix.plugin }}
           GATE_LOG_KEY: ${{ secrets.GATE_LOG_KEY }}
           QUIET_LABEL: ${{ matrix.plugin }}
           QUIET_KIND: generic
           QUIET_CMD: bash "$GITHUB_WORKSPACE/_pb/.github/scripts/utools-gate.sh"
-        run: bash "$GITHUB_WORKSPACE/_pb/.github/scripts/quiet.sh"
+        run: |
+          set -euo pipefail
+          set +e
+          out=$(bash "$GITHUB_WORKSPACE/_pb/.github/scripts/quiet.sh")
+          rc=$?
+          set -e
+          printf '%s\n' "$out"
+          if printf '%s\n' "$out" | grep -qx 'SKIP test no-script'; then
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skipped=false" >> "$GITHUB_OUTPUT"
+          fi
+          exit "$rc"
+
+      - name: "SKIP test no-script"
+        if: success() && steps.gate.outputs.skipped == 'true'
+        run: echo "SKIP test no-script"
 
   report:
     name: post-statuses
@@ -270,6 +292,7 @@ jobs:
             exit 1
           fi
           declare -A conc=()
+          declare -A detail=()
           contexts=()
           for scope in ${SCOPES}; do
             case "$scope" in
@@ -280,12 +303,14 @@ jobs:
           done
           for attempt in 1 2 3 4 5 6; do
             conc=()
-            while IFS=$'\t' read -r name conclusion; do
+            detail=()
+            while IFS=$'\t' read -r name conclusion skipped; do
               [ -n "$name" ] || continue
               conc["$name"]=$conclusion
+              detail["$name"]=$skipped
             done < <(GH_TOKEN="$ACTIONS_TOKEN" gh api --paginate \
               "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/jobs?per_page=100" \
-              --jq '.jobs[] | [.name, (.conclusion // "")] | @tsv')
+              --jq '.jobs[] | [.name, (.conclusion // ""), (if ((.steps // []) | any(.name == "SKIP test no-script" and .conclusion == "success")) then "skipped" else "" end)] | @tsv')
             missing=0
             for ctx in "${contexts[@]}"; do
               if [ -z "${conc[$ctx]:-}" ]; then
@@ -299,16 +324,27 @@ jobs:
             sleep 5
           done
           for name in "${!conc[@]}"; do
-            echo "job ${name} => ${conc[$name]}"
+            if [ "${detail[$name]:-}" = "skipped" ]; then
+              echo "job ${name} => ${conc[$name]} SKIP"
+            else
+              echo "job ${name} => ${conc[$name]}"
+            fi
           done
           post() {
-            local ctx="$1" conclusion="${2:-}" state desc
+            local ctx="$1" conclusion="${2:-}" skipped="${3:-}" state desc
             case "$conclusion" in
-              success) state=success; desc=success ;;
+              success)
+                state=success
+                if [ "$skipped" = "skipped" ]; then
+                  desc="SKIP test no-script"
+                else
+                  desc=success
+                fi
+                ;;
               cancelled) state=failure; desc=cancelled ;;
               *) state=failure; desc=failure ;;
             esac
-            echo "status ${ctx} ${state}"
+            echo "status ${ctx} ${state} ${desc}"
             GH_TOKEN="$STATUS_TOKEN" gh api --method POST \
               "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
               -f state="$state" \
@@ -317,7 +353,7 @@ jobs:
               -f context="$ctx" >/dev/null
           }
           for ctx in "${contexts[@]}"; do
-            post "$ctx" "${conc[$ctx]:-}"
+            post "$ctx" "${conc[$ctx]:-}" "${detail[$ctx]:-}"
           done
 
   purge-logs:

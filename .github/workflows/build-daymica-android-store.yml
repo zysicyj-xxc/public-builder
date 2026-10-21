@@ -89,6 +89,7 @@ jobs:
 
       - name: Read Flutter version
         id: flutter
+        shell: bash
         run: |
           set -euo pipefail
           if [ ! -f .flutter-version ]; then

@@ -1,6 +1,7 @@
 # Fail when poll-private-gates.yml has not started a run in 30 minutes.
 # Dispatch that workflow once with the default token, then open or update
 # one fixed-title issue. No extra credentials.
+# When that run is fresh and the issue is open, comment once and close it.
 # Trust boundary: schedule and workflow_dispatch only. No pull_request.
 # Script stdout is only PASS or FAIL.
 

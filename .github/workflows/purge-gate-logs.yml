@@ -1,5 +1,5 @@
 # Delete logs of completed gate runs. A gate run dispatches this workflow
-# with its own run id; the 5-minute schedule sweeps anything left behind.
+# with its own run id; the schedule sweeps anything left behind.
 # Job-level actions: write is what DELETE /actions/runs/{id}/logs needs.
 # The organization read-only default does not remove a permission declared here.
 # dry_run calls GET /repos/{owner}/{repo}/actions/runs?per_page=1 and counts
@@ -9,7 +9,8 @@ name: Purge Gate Logs
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    # Offset from poll-private-gates (3/13/23/33/43/53) and the watchdog (8/38).
+    - cron: '6,16,26,36,46,56 * * * *'
   workflow_dispatch:
     inputs:
       run_id:

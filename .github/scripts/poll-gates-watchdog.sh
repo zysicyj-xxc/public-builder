@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Fail when poll-private-gates.yml has not started a run in 30 minutes.
 # Dispatch that workflow once, then open or update one fixed-title issue.
+# When the latest run is fresh and that issue is open, comment once and close it.
 # stdout is only PASS or FAIL lines. No refs, tags, URLs, or tokens.
 set -euo pipefail
 
 WORKFLOW=poll-private-gates.yml
 ISSUE_TITLE='poll-private-gates schedule stale'
+RECOVER_COMMENT='poll-private-gates.yml 已在 30 分钟内再次运行，关闭此告警。'
 STALE_SECONDS=1800
 
 export GH_PROMPT_DISABLED=1
@@ -39,6 +41,46 @@ gh_call() {
     gh_out=""
   fi
   rm -f "$out" "$err"
+}
+
+list_stale_issues() {
+  local repo="$1"
+  gh_call issue list --repo "$repo" --state open --limit 50 \
+    --search "${ISSUE_TITLE} in:title" \
+    --json number,title \
+    --jq '.[] | select(.title=="poll-private-gates schedule stale") | .number'
+}
+
+close_open_issues() {
+  local repo="$1" note num closed
+  list_stale_issues "$repo"
+  if [ "$gh_rc" -ne 0 ]; then
+    echo "FAIL close"
+    exit 1
+  fi
+  note=$(mktemp)
+  printf '%s\n' "$RECOVER_COMMENT" >"$note"
+  closed=0
+  while IFS= read -r num; do
+    [ -n "$num" ] || continue
+    gh_call issue comment "$num" --repo "$repo" --body-file "$note"
+    if [ "$gh_rc" -ne 0 ]; then
+      rm -f "$note"
+      echo "FAIL close"
+      exit 1
+    fi
+    gh_call issue close "$num" --repo "$repo"
+    if [ "$gh_rc" -ne 0 ]; then
+      rm -f "$note"
+      echo "FAIL close"
+      exit 1
+    fi
+    closed=1
+  done < <(printf '%s\n' "$gh_out" | awk '/^[0-9]+$/ { print $1 }' | sort -n)
+  rm -f "$note"
+  if [ "$closed" -eq 1 ]; then
+    echo "PASS close"
+  fi
 }
 
 write_body() {
@@ -93,6 +135,7 @@ main() {
 
   if ! stale_age "$age"; then
     echo "PASS poll"
+    close_open_issues "$repo"
     exit 0
   fi
 
@@ -121,10 +164,7 @@ main() {
   write_body "$minutes" "$dispatch_state" "$body"
 
   issue_failed=0
-  gh_call issue list --repo "$repo" --state open --limit 50 \
-    --search "${ISSUE_TITLE} in:title" \
-    --json number,title \
-    --jq '.[] | select(.title=="poll-private-gates schedule stale") | .number'
+  list_stale_issues "$repo"
   if [ "$gh_rc" -ne 0 ]; then
     issue_failed=1
   else
@@ -163,6 +203,22 @@ selftest() {
     echo "FAIL selftest-cron"
     exit 1
   fi
+  if ! grep -Fq "cron: '6,16,26,36,46,56 * * * *'" "$wf_dir/purge-gate-logs.yml"; then
+    echo "FAIL selftest-cron"
+    exit 1
+  fi
+  if grep -Fq "cron: '*/5 * * * *'" "$wf_dir/purge-gate-logs.yml"; then
+    echo "FAIL selftest-cron"
+    exit 1
+  fi
+  for purge_min in 6 16 26 36 46 56; do
+    for other_min in 3 13 23 33 43 53 8 38; do
+      if [ "$purge_min" = "$other_min" ]; then
+        echo "FAIL selftest-cron"
+        exit 1
+      fi
+    done
+  done
   if grep -Eq '^[[:space:]]*(pull_request|pull_request_target|push|fork|issues|issue_comment):[[:space:]]*$' \
     "$wf_dir/poll-gates-watchdog.yml"; then
     echo "FAIL selftest-trigger"
@@ -223,6 +279,8 @@ selftest() {
   export FAKE_CREATE_RC=0
   export FAKE_EDIT_RC=0
   export FAKE_DISPATCH_RC=0
+  export FAKE_COMMENT_RC=0
+  export FAKE_CLOSE_RC=0
 
   reset_fakes() {
     FAKE_CREATED=''
@@ -232,6 +290,8 @@ selftest() {
     FAKE_CREATE_RC=0
     FAKE_EDIT_RC=0
     FAKE_DISPATCH_RC=0
+    FAKE_COMMENT_RC=0
+    FAKE_CLOSE_RC=0
     DISPATCH_REF='main'
   }
 
@@ -286,6 +346,27 @@ if printf '%s' "$joined" | grep -q 'issue edit'; then
     esac
   done
   exit "${FAKE_EDIT_RC:-0}"
+fi
+if printf '%s' "$joined" | grep -q 'issue comment'; then
+  record comment
+  save_body "$@"
+  for a in "$@"; do
+    case "$a" in
+      ''|*[!0-9]*) ;;
+      *) printf '%s\n' "commentnum=$a" >>"$actions"; break ;;
+    esac
+  done
+  exit "${FAKE_COMMENT_RC:-0}"
+fi
+if printf '%s' "$joined" | grep -q 'issue close'; then
+  record close
+  for a in "$@"; do
+    case "$a" in
+      ''|*[!0-9]*) ;;
+      *) printf '%s\n' "closenum=$a" >>"$actions"; break ;;
+    esac
+  done
+  exit "${FAKE_CLOSE_RC:-0}"
 fi
 if printf '%s' "$joined" | grep -q 'dispatches'; then
   record dispatch
@@ -349,9 +430,67 @@ EOF
     echo "FAIL selftest-fresh"
     exit 1
   fi
-  if [ "$(count_action runs)" -ne 1 ] || [ "$(count_action dispatch)" -ne 0 ] \
-    || [ "$(count_action create)" -ne 0 ] || [ "$(count_action edit)" -ne 0 ]; then
+  if [ "$(count_action runs)" -ne 1 ] || [ "$(count_action list)" -ne 1 ] \
+    || [ "$(count_action dispatch)" -ne 0 ] || [ "$(count_action create)" -ne 0 ] \
+    || [ "$(count_action edit)" -ne 0 ] || [ "$(count_action comment)" -ne 0 ] \
+    || [ "$(count_action close)" -ne 0 ] || grep -Fxq 'PASS close' "$TEST_OUT"; then
     echo "FAIL selftest-fresh"
+    exit 1
+  fi
+  rm -rf "$TEST_DIR"
+
+  reset_fakes
+  FAKE_CREATED=$(date -u -d "@$((epoch - 600))" +%Y-%m-%dT%H:%M:%SZ)
+  FAKE_ISSUES=$'9\n3\n'
+  run_main
+  check_logs recover
+  if [ "$TEST_RC" -ne 0 ] || ! grep -Fxq 'PASS poll' "$TEST_OUT" \
+    || ! grep -Fxq 'PASS close' "$TEST_OUT"; then
+    echo "FAIL selftest-recover"
+    exit 1
+  fi
+  if [ "$(count_action comment)" -ne 2 ] || [ "$(count_action close)" -ne 2 ] \
+    || [ "$(count_action dispatch)" -ne 0 ] || [ "$(count_action create)" -ne 0 ] \
+    || ! grep -Fxq 'commentnum=3' "$TEST_DIR/actions" \
+    || ! grep -Fxq 'closenum=3' "$TEST_DIR/actions" \
+    || ! grep -Fxq 'commentnum=9' "$TEST_DIR/actions" \
+    || ! grep -Fxq 'closenum=9' "$TEST_DIR/actions"; then
+    echo "FAIL selftest-recover"
+    exit 1
+  fi
+  if ! grep -Fxq 'poll-private-gates.yml 已在 30 分钟内再次运行，关闭此告警。' "$TEST_DIR/body"; then
+    echo "FAIL selftest-recover"
+    exit 1
+  fi
+  if grep -E -q 'https?://|refs/|ghp_' "$TEST_DIR/body"; then
+    echo "FAIL selftest-recover"
+    exit 1
+  fi
+  rm -rf "$TEST_DIR"
+
+  reset_fakes
+  FAKE_CREATED=$(date -u -d "@$((epoch - 600))" +%Y-%m-%dT%H:%M:%SZ)
+  FAKE_ISSUES='7'
+  FAKE_COMMENT_RC=1
+  run_main
+  check_logs comment
+  if [ "$TEST_RC" -ne 1 ] || ! grep -Fxq 'PASS poll' "$TEST_OUT" \
+    || ! grep -Fxq 'FAIL close' "$TEST_OUT" \
+    || [ "$(count_action comment)" -ne 1 ] || [ "$(count_action close)" -ne 0 ]; then
+    echo "FAIL selftest-comment"
+    exit 1
+  fi
+  rm -rf "$TEST_DIR"
+
+  reset_fakes
+  FAKE_CREATED=$(date -u -d "@$((epoch - 600))" +%Y-%m-%dT%H:%M:%SZ)
+  FAKE_ISSUES='7'
+  FAKE_CLOSE_RC=1
+  run_main
+  check_logs closefail
+  if [ "$TEST_RC" -ne 1 ] || ! grep -Fxq 'FAIL close' "$TEST_OUT" \
+    || [ "$(count_action comment)" -ne 1 ] || [ "$(count_action close)" -ne 1 ]; then
+    echo "FAIL selftest-closefail"
     exit 1
   fi
   rm -rf "$TEST_DIR"

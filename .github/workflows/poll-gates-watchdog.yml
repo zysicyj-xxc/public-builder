@@ -1,0 +1,49 @@
+# Fail when poll-private-gates.yml has not started a run in 30 minutes.
+# Dispatch that workflow once with the default token, then open or update
+# one fixed-title issue. No extra credentials.
+# When that run is fresh and the issue is open, comment once and close it.
+# Trust boundary: schedule and workflow_dispatch only. No pull_request.
+# Script stdout is only PASS or FAIL.
+
+name: Poll Gates Watchdog
+
+on:
+  schedule:
+    # Offset from poll-private-gates.yml (3,13,23,33,43,53).
+    - cron: '8,38 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: poll-gates-watchdog
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  watch:
+    name: watch
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Self-check
+        run: bash .github/scripts/poll-gates-watchdog.sh --selftest
+
+      - name: Check poll schedule
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISPATCH_REF: ${{ github.ref_name }}
+        run: bash .github/scripts/poll-gates-watchdog.sh

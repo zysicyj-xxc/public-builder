@@ -9,7 +9,8 @@ name: Poll Private Gates
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    # Off the top of the hour. GitHub drops scheduled runs that pile up at :00.
+    - cron: '3,13,23,33,43,53 * * * *'
   workflow_dispatch:
     inputs:
       only:

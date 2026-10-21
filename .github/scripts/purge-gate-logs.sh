@@ -17,6 +17,7 @@ repo="${GITHUB_REPOSITORY:?}"
 
 gates=(
   poll-private-gates.yml
+  poll-gates-watchdog.yml
   quality-analyze.yml
   flutter-test.yml
   daymica-test.yml

@@ -1,5 +1,7 @@
-# Poll zysicyj-xxc/zysicyj for open PR heads and main, then dispatch the
-# matching public-builder gate when its commit status is missing.
+# Poll zysicyj-xxc/zysicyj for open PR heads and the default-branch head.
+# The head uses the same gates as a PR head, once per SHA: any existing
+# public-builder status skips it, including pending. A gitleaks status
+# does not count, and neither do release contexts such as build-check.
 # Trust boundary: schedule and workflow_dispatch only. No pull_request.
 # PRIVATE_REPO_ACCESS_TOKEN reads the private repo and writes statuses.
 # The poll job and the purge job declare actions: write themselves.

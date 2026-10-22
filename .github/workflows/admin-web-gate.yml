@@ -1,7 +1,8 @@
 # validate-admin-web for zysicyj-xxc/zysicyj on free public Actions minutes.
-# Node 22. pnpm comes from apps/admin-web packageManager, else pnpm 9.12.3.
-# corepack shims install under $HOME. Commands are install --frozen-lockfile,
-# typecheck, test, and build. Poll does not filter by path: every dispatched
+# Node 22. pnpm is `corepack prepare pnpm@9.12.3 --activate`.
+# Install apps/web_shared, then apps/admin-web, both
+# `pnpm install --frozen-lockfile --ignore-scripts`. Then in apps/admin-web:
+# typecheck, test, build. Poll does not filter by path: every dispatched
 # SHA gets this status, including PRs that do not touch apps/admin-web.
 # Trust boundary: repository_dispatch and workflow_dispatch inputs are untrusted.
 # Status posts use PRIVATE_REPO_ACCESS_TOKEN on a job that does not run the app.

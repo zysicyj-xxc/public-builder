@@ -1,64 +1,24 @@
 #!/usr/bin/env bash
-# gitleaks 8.30.1 over BASE..HEAD. Empty BASE scans the one checked-out commit.
-# Config is .gitleaks.toml, else gitleaks.toml, else the 8.30.1 built-in rules.
-# The public line is a leak count. A redacted report follows only on failure
-# so quiet.sh can encrypt it and drop paths and secret text.
+# gitleaks 8.30.1: `gitleaks git --config .gitleaks.toml`.
+# With no --log-opts this is `git log -p -U0 --full-history --all`,
+# and only added lines are scanned. Checkout must be fetch-depth 0.
+# --redact and the json report do not change that scan. The public line
+# is a leak count. The report follows only on failure so quiet.sh can
+# encrypt it and drop paths and secret text.
 set -euo pipefail
 
-is_sha() {
-  printf '%s' "$1" | grep -Eq '^[0-9a-f]{40}$'
-}
-
-is_zero_sha() {
-  local s="$1" rest
-  [ "${#s}" -eq 40 ] || return 1
-  rest=$(printf '%s' "$s" | tr -d '0')
-  [ -z "$rest" ]
-}
-
-norm_sha() {
-  printf '%s' "$1" | tr 'A-F' 'a-f' | tr -d '[:space:]'
-}
-
 run_scan() {
-  local base head opts n rc report err
-  local -a cfg=()
-  base=$(norm_sha "${BASE:-}")
-  head=$(norm_sha "${HEAD_SHA:-}")
-  if ! is_sha "$head" || is_zero_sha "$head"; then
-    echo "FAIL gitleaks leaks=0"
+  local n rc report err
+  if [ ! -f .gitleaks.toml ]; then
+    echo "FAIL gitleaks config=0"
     return 1
   fi
-  if [ -n "$base" ] && { ! is_sha "$base" || is_zero_sha "$base"; }; then
-    echo "FAIL gitleaks leaks=0"
-    return 1
-  fi
-
-  if [ -f .gitleaks.toml ]; then
-    cfg=(--config .gitleaks.toml)
-    echo "PASS config=1"
-  elif [ -f gitleaks.toml ]; then
-    cfg=(--config gitleaks.toml)
-    echo "PASS config=1"
-  else
-    echo "PASS config=0"
-  fi
-
-  if [ -n "$base" ]; then
-    if ! git cat-file -e "${base}^{commit}" 2>/dev/null \
-      || ! git cat-file -e "${head}^{commit}" 2>/dev/null; then
-      echo "FAIL gitleaks leaks=0"
-      return 1
-    fi
-    opts="${base}..${head}"
-  else
-    opts="-n 1"
-  fi
+  echo "PASS config=1"
 
   report=$(mktemp)
   err=$(mktemp)
   set +e
-  gitleaks detect --source . "${cfg[@]}" --log-opts="$opts" \
+  gitleaks git --config .gitleaks.toml \
     --redact --no-banner --exit-code 1 \
     --report-format json --report-path "$report" >"$err" 2>&1
   rc=$?
@@ -99,12 +59,11 @@ print(len(d) if isinstance(d, list) else 0)' "$report" 2>/dev/null || echo 0)
 }
 
 selftest() {
-  local root repo dir out rc zeros base head
+  local root repo dir out rc zeros
   root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
   zeros=$(python3 -c 'print("0"*40)')
   if grep -Fq "$zeros" \
     "$root/.github/scripts/gitleaks-gate.sh" \
-    "$root/.github/scripts/gitleaks-range.sh" \
     "$root/.github/workflows/gitleaks.yml"; then
     echo "FAIL selftest-zero"
     exit 1
@@ -112,22 +71,22 @@ selftest() {
 
   repo=$(mktemp -d)
   dir=$(mktemp -d)
-  git -C "$repo" init -q
-  git -C "$repo" config user.email "selftest@example.com"
-  git -C "$repo" config user.name "selftest"
-  git -C "$repo" config commit.gpgsign false
-  echo "one" >"$repo/f"
-  git -C "$repo" add f
-  git -C "$repo" commit -q -m one
-  base=$(git -C "$repo" rev-parse HEAD)
-  echo "two" >"$repo/f"
-  git -C "$repo" commit -q -am two
-  head=$(git -C "$repo" rev-parse HEAD)
   printf 'title = "local"\n' >"$repo/.gitleaks.toml"
 
   cat >"$dir/gitleaks" <<'EOF'
 #!/bin/bash
 set -euo pipefail
+printf '%s\n' "$*" >>"${FAKE_GITLEAKS_LOG:?}"
+if [ "${1:-}" != "git" ]; then
+  exit 2
+fi
+case " $* " in
+  *" --log-opts"*|*" detect "*) exit 2 ;;
+esac
+case " $* " in
+  *" --config .gitleaks.toml "*) ;;
+  *) exit 2 ;;
+esac
 report=""
 prev=""
 for a in "$@"; do
@@ -136,11 +95,6 @@ for a in "$@"; do
   fi
   prev=$a
 done
-if [ ! -f .gitleaks.toml ] && [ ! -f gitleaks.toml ]; then
-  if printf '%s\n' "$@" | grep -q -- '--config'; then
-    exit 2
-  fi
-fi
 if [ "${FAKE_LEAKS:-0}" != 0 ]; then
   printf '%s\n' '[{"File":"apps/secret/key.env","Secret":"supersecretvalue","StartLine":12}]' >"$report"
   exit 1
@@ -149,6 +103,8 @@ printf '%s\n' '[]' >"$report"
 exit 0
 EOF
   chmod +x "$dir/gitleaks"
+  export FAKE_GITLEAKS_LOG="$dir/gitleaks.log"
+  : >"$FAKE_GITLEAKS_LOG"
 
   run_quiet() {
     local label="$1"
@@ -165,22 +121,23 @@ EOF
     )
     rc=$?
     set -e
-    if printf '%s\n' "$out" | grep -F -q -e 'supersecretvalue' -e 'key.env' -e "$base" -e "$head" -e "$zeros"; then
+    if printf '%s\n' "$out" | grep -F -q -e 'supersecretvalue' -e 'key.env' -e "$zeros"; then
       echo "FAIL selftest-${label}-leak"
       exit 1
     fi
   }
 
   export FAKE_LEAKS=0
-  run_quiet clean "BASE='$base' HEAD_SHA='$head' bash '$root/.github/scripts/gitleaks-gate.sh'"
+  run_quiet clean "bash '$root/.github/scripts/gitleaks-gate.sh'"
   if [ "$rc" -ne 0 ] || ! printf '%s\n' "$out" | grep -qx 'PASS config=1' \
-    || ! printf '%s\n' "$out" | grep -qx 'PASS gitleaks leaks=0'; then
+    || ! printf '%s\n' "$out" | grep -qx 'PASS gitleaks leaks=0' \
+    || ! grep -qx 'git --config .gitleaks.toml --redact --no-banner --exit-code 1 --report-format json --report-path .*' "$FAKE_GITLEAKS_LOG"; then
     echo "FAIL selftest-clean"
     exit 1
   fi
 
   export FAKE_LEAKS=1
-  run_quiet leak "BASE='$base' HEAD_SHA='$head' bash '$root/.github/scripts/gitleaks-gate.sh'"
+  run_quiet leak "bash '$root/.github/scripts/gitleaks-gate.sh'"
   if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -qx 'FAIL gitleaks leaks=1'; then
     echo "FAIL selftest-leak-count"
     exit 1
@@ -190,10 +147,12 @@ EOF
     exit 1
   fi
 
-  export FAKE_LEAKS=0
-  run_quiet one "BASE='' HEAD_SHA='$head' bash '$root/.github/scripts/gitleaks-gate.sh'"
-  if [ "$rc" -ne 0 ] || ! printf '%s\n' "$out" | grep -qx 'PASS gitleaks leaks=0'; then
-    echo "FAIL selftest-one"
+  rm -f "$repo/.gitleaks.toml"
+  : >"$FAKE_GITLEAKS_LOG"
+  run_quiet noconfig "bash '$root/.github/scripts/gitleaks-gate.sh'"
+  if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -qx 'FAIL gitleaks config=0' \
+    || [ -s "$FAKE_GITLEAKS_LOG" ]; then
+    echo "FAIL selftest-config"
     exit 1
   fi
 

@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
-# validate-admin-web: Node 22, pnpm from packageManager (else pnpm 9.12.3).
+# validate-admin-web: Node 22, corepack prepare pnpm@9.12.3 --activate.
 # corepack shims go under $HOME, not /usr/local/bin.
-# Commands: pnpm install --frozen-lockfile, typecheck, test, build.
+# Install apps/web_shared, then apps/admin-web. Both use
+# pnpm install --frozen-lockfile --ignore-scripts.
+# Then, in apps/admin-web: pnpm typecheck, pnpm test, pnpm build.
 # Summary lines are PASS/FAIL names. Command output stays on stdout for quiet.sh.
 set -euo pipefail
 
-run_step() {
-  local name="$1"
-  shift
+run_in() {
+  local name="$1" dir="$2"
+  shift 2
   set +e
-  "$@"
+  (cd "$dir" && "$@")
   local rc=$?
   set -e
   if [ "$rc" -eq 0 ]; then
@@ -21,7 +23,7 @@ run_step() {
 }
 
 run_gate() {
-  local major pm
+  local major
   if [ ! -f apps/admin-web/package.json ]; then
     echo "FAIL admin-web missing=1"
     return 1
@@ -33,36 +35,23 @@ run_gate() {
   fi
   echo "PASS node major=22"
 
-  pm=$(python3 -c 'import json,re,sys
-p=json.load(open("apps/admin-web/package.json", encoding="utf-8"))
-pm=p.get("packageManager") or ""
-if not isinstance(pm, str):
-    pm=""
-if pm and not re.fullmatch(r"[A-Za-z0-9@._+-]+", pm):
-    sys.exit(2)
-print(pm)') || {
-    echo "FAIL package"
-    return 1
-  }
-  if [ -z "$pm" ]; then
-    pm='pnpm@9.12.3'
-  fi
-
   mkdir -p "$HOME/.local/bin" "$HOME/.local/share/pnpm"
   export PNPM_HOME="$HOME/.local/share/pnpm"
   export PATH="$HOME/.local/bin:$PNPM_HOME:$PATH"
   if ! corepack enable --install-directory "$HOME/.local/bin" \
-    || ! corepack prepare "$pm" --activate; then
+    || ! corepack prepare pnpm@9.12.3 --activate; then
     echo "FAIL pnpm"
     return 1
   fi
   echo "PASS pnpm"
 
-  cd apps/admin-web
-  run_step install pnpm install --frozen-lockfile
-  run_step typecheck pnpm typecheck
-  run_step test pnpm test
-  run_step build pnpm build
+  run_in "install web-shared" apps/web_shared \
+    pnpm install --frozen-lockfile --ignore-scripts || return
+  run_in "install admin-web" apps/admin-web \
+    pnpm install --frozen-lockfile --ignore-scripts || return
+  run_in typecheck apps/admin-web pnpm typecheck || return
+  run_in test apps/admin-web pnpm test || return
+  run_in build apps/admin-web pnpm build
 }
 
 selftest() {
@@ -70,10 +59,11 @@ selftest() {
   root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
   work=$(mktemp -d)
   dir=$(mktemp -d)
-  mkdir -p "$work/apps/admin-web" "$dir/home/.local/bin"
+  mkdir -p "$work/apps/admin-web" "$work/apps/web_shared" "$dir/home/.local/bin"
   cat >"$work/apps/admin-web/package.json" <<'EOF'
-{"packageManager":"pnpm@9.12.3","scripts":{"typecheck":"tsc","test":"vitest","build":"vite build"}}
+{"packageManager":"pnpm@10.0.0","scripts":{"typecheck":"tsc","test":"vitest","build":"vite build"}}
 EOF
+  printf '%s\n' '{}' >"$work/apps/web_shared/package.json"
 
   cat >"$dir/node" <<'EOF'
 #!/bin/bash
@@ -93,7 +83,7 @@ exit 0
 EOF
   cat >"$dir/pnpm" <<'EOF'
 #!/bin/bash
-printf '%s\n' "$*" >>"${FAKE_PNPM_LOG:?}"
+printf '%s\t%s\n' "$PWD" "$*" >>"${FAKE_PNPM_LOG:?}"
 if [ "${1:-}" = "${FAKE_PNPM_FAIL:-}" ]; then
   echo "secret at apps/admin-web/src/a.ts:3"
   exit 1
@@ -122,10 +112,36 @@ EOF
     set -e
   }
 
+  assert_installs() {
+    python3 - "$FAKE_PNPM_LOG" <<'PY'
+import sys
+rows = []
+for line in open(sys.argv[1], encoding="utf-8"):
+    pwd, _, args = line.rstrip("\n").partition("\t")
+    rows.append((pwd, args))
+installs = [(pwd, args) for pwd, args in rows if args.startswith("install ")]
+if [args for _, args in installs if args != "install --frozen-lockfile --ignore-scripts"]:
+    raise SystemExit("bad install args")
+if len(installs) != 2:
+    raise SystemExit("install count")
+if not installs[0][0].endswith("/apps/web_shared"):
+    raise SystemExit("web_shared order")
+if not installs[1][0].endswith("/apps/admin-web"):
+    raise SystemExit("admin-web order")
+rest = [(pwd, args) for pwd, args in rows if not args.startswith("install ")]
+want = ["typecheck", "test", "build"]
+if [args for _, args in rest] != want:
+    raise SystemExit("later commands")
+if any(not pwd.endswith("/apps/admin-web") for pwd, _ in rest):
+    raise SystemExit("later cwd")
+PY
+  }
+
   run_quiet "bash '$root/.github/scripts/admin-web-gate.sh'"
   if [ "$rc" -ne 0 ] \
     || ! printf '%s\n' "$out" | grep -qx 'PASS node major=22' \
-    || ! printf '%s\n' "$out" | grep -qx 'PASS install' \
+    || ! printf '%s\n' "$out" | grep -qx 'PASS install web-shared' \
+    || ! printf '%s\n' "$out" | grep -qx 'PASS install admin-web' \
     || ! printf '%s\n' "$out" | grep -qx 'PASS typecheck' \
     || ! printf '%s\n' "$out" | grep -qx 'PASS test' \
     || ! printf '%s\n' "$out" | grep -qx 'PASS build'; then
@@ -134,10 +150,11 @@ EOF
   fi
   if ! grep -qx 'enable --install-directory '"$dir/home/.local/bin" "$FAKE_COREPACK_LOG" \
     || ! grep -qx 'prepare pnpm@9.12.3 --activate' "$FAKE_COREPACK_LOG" \
-    || ! grep -qx 'install --frozen-lockfile' "$FAKE_PNPM_LOG" \
-    || ! grep -qx 'typecheck' "$FAKE_PNPM_LOG" \
-    || ! grep -qx 'test' "$FAKE_PNPM_LOG" \
-    || ! grep -qx 'build' "$FAKE_PNPM_LOG"; then
+    || grep -q 'pnpm@10.0.0' "$FAKE_COREPACK_LOG"; then
+    echo "FAIL selftest-pnpm"
+    exit 1
+  fi
+  if ! assert_installs; then
     echo "FAIL selftest-cmds"
     exit 1
   fi
@@ -146,6 +163,17 @@ EOF
     exit 1
   fi
 
+  : >"$FAKE_PNPM_LOG"
+  rm -rf "$work/apps/web_shared"
+  run_quiet "bash '$root/.github/scripts/admin-web-gate.sh'"
+  if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -qx 'FAIL install web-shared' \
+    || grep -q $'\tinstall ' "$FAKE_PNPM_LOG"; then
+    echo "FAIL selftest-web-shared"
+    exit 1
+  fi
+
+  mkdir -p "$work/apps/web_shared"
+  printf '%s\n' '{}' >"$work/apps/web_shared/package.json"
   : >"$FAKE_PNPM_LOG"
   export FAKE_PNPM_FAIL=test
   run_quiet "bash '$root/.github/scripts/admin-web-gate.sh'"

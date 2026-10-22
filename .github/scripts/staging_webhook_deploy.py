@@ -94,6 +94,7 @@ ALLOW_ENV = (
 
 
 def fail(code):
+    note_detail(f"FAIL_CODE: {code}", [])
     if not re.fullmatch(r"[a-z0-9-]{1,40}", code):
         code = "internal"
     print(f"FAIL {code}", file=sys.stderr)
@@ -592,6 +593,7 @@ def post_once(archive: Path, sha, key, ip):
         path = Path(body.name)
         if path.is_file() and path.stat().st_size <= 65536:
             payload = path.read_bytes()
+        note_detail(f"HTTP_RESULT code={code} body={payload.decode('utf-8', errors='replace')[:500]}", [key, ip])
         return code, payload
     finally:
         Path(body.name).unlink(missing_ok=True)

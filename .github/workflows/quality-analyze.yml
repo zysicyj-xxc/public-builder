@@ -277,11 +277,19 @@ jobs:
             docker ps --format '{{.Image}}' >&2
             exit 1
           fi
-          for f in \
-            backend/sql/security_settings.sql \
-            backend/sql/user_totp_trusted_devices.sql \
-            backend/sql/user_app_memberships.sql
+          for n in \
+            security_settings.sql \
+            user_totp_trusted_devices.sql \
+            user_app_memberships.sql
           do
+            if [ -f "backend/sql/已执行-测试/$n" ]; then
+              f="backend/sql/已执行-测试/$n"
+            elif [ -f "backend/sql/$n" ]; then
+              f="backend/sql/$n"
+            else
+              echo "ERROR: $n not found" >&2
+              exit 1
+            fi
             docker exec -i -e MYSQL_PWD "$cid" mysql --protocol=TCP -uroot zysicyj_test < "$f" >/dev/null
           done
           echo "PASS sql"

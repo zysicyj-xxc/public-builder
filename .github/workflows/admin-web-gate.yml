@@ -1,9 +1,12 @@
 # validate-admin-web for zysicyj-xxc/zysicyj on free public Actions minutes.
-# Node 22. pnpm is `corepack prepare pnpm@9.12.3 --activate`.
+# Node is 22.14.0 (private NODE_WANT). pnpm is
+# `corepack prepare pnpm@9.12.3 --activate`, shims under $HOME/.pnpm-bin.
 # Install apps/web_shared, then apps/admin-web, both
 # `pnpm install --frozen-lockfile --ignore-scripts`. Then in apps/admin-web:
-# typecheck, test, build. Poll does not filter by path: every dispatched
-# SHA gets this status, including PRs that do not touch apps/admin-web.
+# typecheck, test, build, and dist/index.html must exist.
+# The private workflow only runs for apps/admin-web/**, apps/web_shared/**,
+# apps/shared_package/generated/**, and itself. Poll does not filter by
+# path: every dispatched SHA gets this status.
 # Trust boundary: repository_dispatch and workflow_dispatch inputs are untrusted.
 # Status posts use PRIVATE_REPO_ACCESS_TOKEN on a job that does not run the app.
 # Commit-status context: validate-admin-web.
@@ -105,7 +108,7 @@ jobs:
     name: validate-admin-web
     needs: meta
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -116,7 +119,7 @@ jobs:
           fetch-depth: 1
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '22.14.0'
       - uses: actions/checkout@v4
         with:
           path: _pb

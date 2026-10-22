@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# validate-admin-web: Node 22, corepack prepare pnpm@9.12.3 --activate.
-# corepack shims go under $HOME, not /usr/local/bin.
+# validate-admin-web. Private NODE_WANT is 22.14.0.
+# corepack prepare pnpm@9.12.3 --activate, shims under $HOME/.pnpm-bin
+# (not /usr/local/bin). Private store-dir is /cache/pnpm-store; hosted
+# runners have no /cache, so the store is $HOME/.pnpm-store.
 # Install apps/web_shared, then apps/admin-web. Both use
 # pnpm install --frozen-lockfile --ignore-scripts.
-# Then, in apps/admin-web: pnpm typecheck, pnpm test, pnpm build.
+# Then, in apps/admin-web: pnpm typecheck, pnpm test, pnpm build,
+# and dist/index.html must exist.
 # Summary lines are PASS/FAIL names. Command output stays on stdout for quiet.sh.
 set -euo pipefail
 
@@ -23,23 +26,22 @@ run_in() {
 }
 
 run_gate() {
-  local major
   if [ ! -f apps/admin-web/package.json ]; then
     echo "FAIL admin-web missing=1"
     return 1
   fi
-  major=$(node -v | sed -n 's/^v\([0-9][0-9]*\)\..*/\1/p')
-  if [ "$major" != "22" ]; then
+  if [ "$(node -v)" != "v22.14.0" ]; then
     echo "FAIL node"
     return 1
   fi
-  echo "PASS node major=22"
+  echo "PASS node 22.14.0"
 
-  mkdir -p "$HOME/.local/bin" "$HOME/.local/share/pnpm"
-  export PNPM_HOME="$HOME/.local/share/pnpm"
-  export PATH="$HOME/.local/bin:$PNPM_HOME:$PATH"
-  if ! corepack enable --install-directory "$HOME/.local/bin" \
-    || ! corepack prepare pnpm@9.12.3 --activate; then
+  mkdir -p "$HOME/.pnpm-bin" "$HOME/.pnpm-store"
+  export PATH="$HOME/.pnpm-bin:$PATH"
+  if ! corepack enable --install-directory "$HOME/.pnpm-bin" \
+    || ! corepack prepare pnpm@9.12.3 --activate \
+    || ! pnpm --version \
+    || ! pnpm config set store-dir "$HOME/.pnpm-store"; then
     echo "FAIL pnpm"
     return 1
   fi
@@ -51,7 +53,12 @@ run_gate() {
     pnpm install --frozen-lockfile --ignore-scripts || return
   run_in typecheck apps/admin-web pnpm typecheck || return
   run_in test apps/admin-web pnpm test || return
-  run_in build apps/admin-web pnpm build
+  run_in build apps/admin-web pnpm build || return
+  if [ ! -f apps/admin-web/dist/index.html ]; then
+    echo "FAIL dist"
+    return 1
+  fi
+  echo "PASS dist"
 }
 
 selftest() {
@@ -59,7 +66,7 @@ selftest() {
   root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
   work=$(mktemp -d)
   dir=$(mktemp -d)
-  mkdir -p "$work/apps/admin-web" "$work/apps/web_shared" "$dir/home/.local/bin"
+  mkdir -p "$work/apps/admin-web" "$work/apps/web_shared" "$dir/home/.pnpm-bin"
   cat >"$work/apps/admin-web/package.json" <<'EOF'
 {"packageManager":"pnpm@10.0.0","scripts":{"typecheck":"tsc","test":"vitest","build":"vite build"}}
 EOF
@@ -68,7 +75,7 @@ EOF
   cat >"$dir/node" <<'EOF'
 #!/bin/bash
 if [ "${1:-}" = "-v" ]; then
-  printf '%s\n' "v22.16.0"
+  printf '%s\n' "v22.14.0"
   exit 0
 fi
 exit 0
@@ -87,6 +94,10 @@ printf '%s\t%s\n' "$PWD" "$*" >>"${FAKE_PNPM_LOG:?}"
 if [ "${1:-}" = "${FAKE_PNPM_FAIL:-}" ]; then
   echo "secret at apps/admin-web/src/a.ts:3"
   exit 1
+fi
+if [ "${1:-}" = "build" ]; then
+  mkdir -p dist
+  : >dist/index.html
 fi
 exit 0
 EOF
@@ -119,6 +130,11 @@ rows = []
 for line in open(sys.argv[1], encoding="utf-8"):
     pwd, _, args = line.rstrip("\n").partition("\t")
     rows.append((pwd, args))
+if not rows or rows[0][1] != "--version":
+    raise SystemExit("version")
+store = [args for _, args in rows if args.startswith("config set store-dir ")]
+if len(store) != 1 or store[0].endswith("/cache/pnpm-store") or not store[0].endswith("/.pnpm-store"):
+    raise SystemExit("store")
 installs = [(pwd, args) for pwd, args in rows if args.startswith("install ")]
 if [args for _, args in installs if args != "install --frozen-lockfile --ignore-scripts"]:
     raise SystemExit("bad install args")
@@ -128,7 +144,11 @@ if not installs[0][0].endswith("/apps/web_shared"):
     raise SystemExit("web_shared order")
 if not installs[1][0].endswith("/apps/admin-web"):
     raise SystemExit("admin-web order")
-rest = [(pwd, args) for pwd, args in rows if not args.startswith("install ")]
+config_at = next(i for i, (_, args) in enumerate(rows) if args.startswith("config set store-dir "))
+install_at = next(i for i, (_, args) in enumerate(rows) if args.startswith("install "))
+if config_at > install_at:
+    raise SystemExit("store order")
+rest = [(pwd, args) for pwd, args in rows if args in ("typecheck", "test", "build")]
 want = ["typecheck", "test", "build"]
 if [args for _, args in rest] != want:
     raise SystemExit("later commands")
@@ -139,16 +159,17 @@ PY
 
   run_quiet "bash '$root/.github/scripts/admin-web-gate.sh'"
   if [ "$rc" -ne 0 ] \
-    || ! printf '%s\n' "$out" | grep -qx 'PASS node major=22' \
+    || ! printf '%s\n' "$out" | grep -qx 'PASS node 22.14.0' \
     || ! printf '%s\n' "$out" | grep -qx 'PASS install web-shared' \
     || ! printf '%s\n' "$out" | grep -qx 'PASS install admin-web' \
     || ! printf '%s\n' "$out" | grep -qx 'PASS typecheck' \
     || ! printf '%s\n' "$out" | grep -qx 'PASS test' \
-    || ! printf '%s\n' "$out" | grep -qx 'PASS build'; then
+    || ! printf '%s\n' "$out" | grep -qx 'PASS build' \
+    || ! printf '%s\n' "$out" | grep -qx 'PASS dist'; then
     echo "FAIL selftest-run"
     exit 1
   fi
-  if ! grep -qx 'enable --install-directory '"$dir/home/.local/bin" "$FAKE_COREPACK_LOG" \
+  if ! grep -qx 'enable --install-directory '"$dir/home/.pnpm-bin" "$FAKE_COREPACK_LOG" \
     || ! grep -qx 'prepare pnpm@9.12.3 --activate' "$FAKE_COREPACK_LOG" \
     || grep -q 'pnpm@10.0.0' "$FAKE_COREPACK_LOG"; then
     echo "FAIL selftest-pnpm"

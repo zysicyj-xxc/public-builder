@@ -47,7 +47,7 @@ jobs:
   meta:
     name: resolve-payload
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
       ref: ${{ steps.resolve.outputs.ref }}
@@ -109,35 +109,6 @@ jobs:
           print("PASS apps count=" + str(len(apps)))
           PY
 
-      - name: Set pending statuses
-        env:
-          SHA: ${{ steps.resolve.outputs.sha }}
-          RUN_APPS: ${{ steps.pick.outputs.run_apps }}
-          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
-            echo "ERROR: sha failed allowlist" >&2
-            exit 1
-          fi
-          post() {
-            gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
-              -f state="pending" \
-              -f target_url="${RUN_URL}" \
-              -f description="running" \
-              -f context="$1" >/dev/null
-          }
-          for app in ${RUN_APPS}; do
-            case "$app" in
-              daymica|mail-box|password-vault|yaoxiaobai|eye-care|footprint|water-tracker|admin-app|shared_package)
-                post "i18n-gate (${app})"
-                ;;
-              *) echo "FAIL apps" >&2; exit 1 ;;
-            esac
-          done
-          echo "PASS pending"
-
       - name: Post failure when resolve fails
         if: failure()
         env:
@@ -155,6 +126,24 @@ jobs:
             echo "no allowlisted sha; dispatcher pending left in place"
             exit 0
           fi
+          mark="${RUNNER_TEMP}/rate-limited"
+          rm -f "$mark"
+          post() {
+            local ctx="$1" out rc
+            if [ -f "$mark" ]; then
+              bash .github/scripts/api-retry.sh post-limited "$sha" "$RUN_URL" "$ctx"
+              return
+            fi
+            set +e
+            out=$(bash .github/scripts/api-retry.sh status "$sha" failure "$ctx" "payload rejected" "$RUN_URL")
+            rc=$?
+            set -e
+            printf '%s\n' "$out"
+            if printf '%s\n' "$out" | grep -Fxq 'FAIL report rate-limited'; then
+              : >"$mark"
+            fi
+            return "$rc"
+          }
           for ctx in \
             "i18n-gate (daymica)" \
             "i18n-gate (mail-box)" \
@@ -166,11 +155,7 @@ jobs:
             "i18n-gate (admin-app)" \
             "i18n-gate (shared_package)"
           do
-            gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${sha}" \
-              -f state="failure" \
-              -f target_url="${RUN_URL}" \
-              -f description="payload rejected" \
-              -f context="${ctx}" >/dev/null
+            post "$ctx"
           done
 
   verify:
@@ -272,10 +257,15 @@ jobs:
     needs: [meta, verify]
     if: always() && needs.meta.result == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     permissions:
       actions: read
+      contents: read
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
       - name: Post conclusions
         env:
           SHA: ${{ needs.meta.outputs.sha }}
@@ -301,16 +291,31 @@ jobs:
               *) echo "FAIL apps" >&2; exit 1 ;;
             esac
           done
+          list_jobs() {
+            GH_TOKEN="$ACTIONS_TOKEN" bash .github/scripts/api-retry.sh call --paginate \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/jobs?per_page=100" \
+              --jq '.jobs[] | [.name, (.conclusion // ""), (if ((.steps // []) | any(.name == "skipped: no test/l10n" and .conclusion == "success")) then "skipped" else "" end)] | @tsv'
+          }
           for attempt in 1 2 3 4 5 6; do
             conc=()
             detail=()
+            set +e
+            listing=$(list_jobs)
+            list_rc=$?
+            set -e
+            if [ "$list_rc" -eq 2 ]; then
+              GH_TOKEN="$STATUS_TOKEN" bash .github/scripts/api-retry.sh post-limited \
+                "$SHA" "$RUN_URL" "${contexts[@]}"
+              exit 0
+            fi
+            if [ "$list_rc" -ne 0 ]; then
+              exit "$list_rc"
+            fi
             while IFS=$'\t' read -r name conclusion skipped; do
               [ -n "$name" ] || continue
               conc["$name"]=$conclusion
               detail["$name"]=$skipped
-            done < <(GH_TOKEN="$ACTIONS_TOKEN" gh api --paginate \
-              "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/jobs?per_page=100" \
-              --jq '.jobs[] | [.name, (.conclusion // ""), (if ((.steps // []) | any(.name == "skipped: no test/l10n" and .conclusion == "success")) then "skipped" else "" end)] | @tsv')
+            done <<<"$listing"
             missing=0
             for ctx in "${contexts[@]}"; do
               if [ -z "${conc[$ctx]:-}" ]; then
@@ -341,13 +346,24 @@ jobs:
               *) state=failure; desc=failure ;;
             esac
             echo "status ${ctx} ${state} ${desc}"
-            GH_TOKEN="$STATUS_TOKEN" gh api --method POST \
-              "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
-              -f state="$state" \
-              -f target_url="${RUN_URL}" \
-              -f description="$desc" \
-              -f context="$ctx" >/dev/null
+            if [ -f "${RUNNER_TEMP}/rate-limited" ]; then
+              GH_TOKEN="$STATUS_TOKEN" bash .github/scripts/api-retry.sh post-limited \
+                "$SHA" "$RUN_URL" "$ctx"
+              return 0
+            fi
+            local out rc
+            set +e
+            out=$(GH_TOKEN="$STATUS_TOKEN" bash .github/scripts/api-retry.sh status \
+              "$SHA" "$state" "$ctx" "$desc" "$RUN_URL")
+            rc=$?
+            set -e
+            printf '%s\n' "$out"
+            if printf '%s\n' "$out" | grep -Fxq 'FAIL report rate-limited'; then
+              : >"${RUNNER_TEMP}/rate-limited"
+            fi
+            return "$rc"
           }
+          rm -f "${RUNNER_TEMP}/rate-limited"
           for ctx in "${contexts[@]}"; do
             post "$ctx" "${conc[$ctx]:-}" "${detail[$ctx]:-}"
           done

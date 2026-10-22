@@ -1,17 +1,29 @@
 #!/usr/bin/env bash
 # List open PR head SHAs. Also consider the private repo default-branch
 # head once: if that commit has no public-builder commit status, dispatch
-# the same gates as a PR head. Pending counts as present. Release
+# the same gates as a PR head. A fresh pending counts as present. Release
 # contexts do not. The gitleaks commit status does. A check-run name
 # such as "gitleaks / scan" is not a commit status. Does not print
 # branch names, titles, or paths.
+# error "dispatch failed", "rate-limited", and "report rate-limited" are
+# missing and can be dispatched again. pending "queued", "running", or
+# "rate-limited" older than 90 minutes is missing too. A 403 or 429 on
+# dispatch writes nothing and stops the rest of the round.
 set -euo pipefail
 
 PRIVATE_REPO="zysicyj-xxc/zysicyj"
 PB_REPO=""
+REDISPATCH_SECS=5400
+RATE_FLOOR=200
 
 only=""
 tmpdir=""
+STOP_POLL=0
+DISPATCH_OK=0
+DISPATCH_RATE=0
+FORCE_ERRORS=0
+RATE_REMAINING=""
+declare -gA PR_NUMBER=()
 
 want() {
   [ -z "$only" ] || [ "$only" = "$1" ]
@@ -42,39 +54,164 @@ is_builder_context() {
   return 1
 }
 
+is_redispatchable() {
+  local state="$1" desc="$2" updated="$3" now stamp
+  case "$state" in
+    error)
+      case "$desc" in
+        "dispatch failed"|rate-limited|"report rate-limited") return 0 ;;
+      esac
+      ;;
+    pending)
+      case "$desc" in
+        queued|running|rate-limited) ;;
+        *) return 1 ;;
+      esac
+      if ! printf '%s' "$updated" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T'; then
+        return 1
+      fi
+      now=$(date -u +%s)
+      stamp=$(date -u -d "$updated" +%s 2>/dev/null) || return 1
+      if [ $((now - stamp)) -gt "$REDISPATCH_SECS" ]; then
+        return 0
+      fi
+      ;;
+  esac
+  return 1
+}
+
 has_builder_status() {
-  local file="$1" ctx state
-  while IFS=$'\t' read -r ctx state || [ -n "${ctx:-}" ]; do
+  local file="$1" ctx state desc updated
+  while IFS=$'\t' read -r ctx state desc updated || [ -n "${ctx:-}" ]; do
     [ -n "$ctx" ] || continue
-    if is_builder_context "$ctx"; then
+    if is_builder_context "$ctx" && ! is_redispatchable "$state" "$desc" "$updated"; then
       return 0
     fi
   done <"$file"
   return 1
 }
 
-post_pending() {
-  local sha="$1" ctx="$2"
+has_redispatch_gap() {
+  local file="$1" ctx state desc updated
+  while IFS=$'\t' read -r ctx state desc updated || [ -n "${ctx:-}" ]; do
+    [ -n "$ctx" ] || continue
+    if is_builder_context "$ctx" && is_redispatchable "$state" "$desc" "$updated"; then
+      return 0
+    fi
+  done <"$file"
+  return 1
+}
+
+http_code_of() {
+  local file="$1" code
+  code=$(awk '
+    BEGIN { c = 0 }
+    { sub(/\r/, "") }
+    /^HTTP\// { c = $2 }
+    END { if (c ~ /^[0-9]+$/) print c; else print 0 }
+  ' "$file")
+  if [ "$code" != "0" ]; then
+    printf '%s' "$code"
+    return 0
+  fi
+  code=$(grep -Eo '\(HTTP [0-9]{3}\)' "$file" 2>/dev/null | head -n 1 | grep -Eo '[0-9]{3}' || true)
+  printf '%s' "${code:-0}"
+}
+
+header_remaining() {
+  awk '
+    BEGIN { IGNORECASE = 1 }
+    {
+      sub(/\r/, "")
+      if (tolower($0) ~ /^x-ratelimit-remaining:/) {
+        sub(/^[^:]+:[[:space:]]*/, "")
+        print
+        exit
+      }
+    }
+  ' "$1"
+}
+
+post_status() {
+  local sha="$1" state="$2" ctx="$3" desc="$4"
   GH_TOKEN="$GH_TOKEN" gh api --method POST "repos/${PRIVATE_REPO}/statuses/${sha}" \
-    -f state="pending" \
+    -f state="$state" \
     -f target_url="$RUN_URL" \
-    -f description="queued" \
+    -f description="$desc" \
     -f context="$ctx" >/dev/null
 }
 
-DISPATCH_OK=0
+post_pending() {
+  post_status "$1" pending "$2" queued
+}
+
 dispatch() {
-  local wf="$1"
-  local body="$2"
+  local wf="$1" body="$2" raw err rc code remain
   DISPATCH_OK=0
-  if ! GH_TOKEN="$DISPATCH_TOKEN" gh api --method POST \
+  DISPATCH_RATE=0
+  raw=$(mktemp)
+  err=$(mktemp)
+  if GH_TOKEN="$DISPATCH_TOKEN" gh api -i --method POST \
     "repos/${PB_REPO}/actions/workflows/${wf}/dispatches" \
-    --input - <<<"$body" >/dev/null; then
-    echo "FAIL dispatch ${wf}"
-    DISPATCH_OK=1
+    --input - <<<"$body" >"$raw" 2>"$err"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  code=$(http_code_of "$raw")
+  if [ "$code" = "0" ]; then
+    code=$(http_code_of "$err")
+  fi
+  remain=$(header_remaining "$raw" || true)
+  rm -f "$raw" "$err"
+  if printf '%s' "$remain" | grep -Eq '^[0-9]+$'; then
+    RATE_REMAINING=$remain
+  fi
+  if [ "$rc" -eq 0 ] && { [ "$code" = "0" ] || { [ "$code" -ge 200 ] && [ "$code" -lt 300 ]; }; }; then
+    echo "PASS dispatch ${wf}"
     return 0
   fi
-  echo "PASS dispatch ${wf}"
+  DISPATCH_OK=1
+  if [ "$code" = "403" ] || [ "$code" = "429" ]; then
+    DISPATCH_RATE=1
+    echo "FAIL poll rate-limited"
+    return 0
+  fi
+  echo "FAIL dispatch ${wf}"
+}
+
+budget_low() {
+  if [ -z "${RATE_REMAINING:-}" ]; then
+    return 1
+  fi
+  [ "$RATE_REMAINING" -lt "$RATE_FLOOR" ]
+}
+
+dispatch_contexts() {
+  local sha="$1" wf="$2" body="$3" ctx
+  shift 3
+  if [ "$STOP_POLL" -ne 0 ]; then
+    return 0
+  fi
+  if budget_low; then
+    STOP_POLL=1
+    echo "FAIL poll rate-limited"
+    return 0
+  fi
+  dispatch "$wf" "$body"
+  if [ "$DISPATCH_RATE" -ne 0 ]; then
+    STOP_POLL=1
+    return 0
+  fi
+  if [ "$DISPATCH_OK" -ne 0 ]; then
+    if [ "$#" -gt 0 ]; then
+      mark_dispatch_failed "$sha" "$@"
+    fi
+    return 0
+  fi
+  for ctx in "$@"; do
+    post_pending "$sha" "$ctx"
+  done
 }
 
 mark_dispatch_failed() {
@@ -95,8 +232,9 @@ latest_states() {
   : >"$out"
   GH_TOKEN="$GH_TOKEN" gh api --paginate \
     "repos/${PRIVATE_REPO}/commits/${sha}/statuses?per_page=100" \
-    --jq '.[] | [.context, .state] | @tsv' >"$out.raw" || true
-  awk -F '\t' 'NF>=2 && !seen[$1]++ { print $1 "\t" $2 }' "$out.raw" >"$out"
+    --jq '.[] | [.context, .state, (.description // ""), (.updated_at // .created_at // "")] | @tsv' \
+    >"$out.raw" || true
+  awk -F '\t' 'NF>=2 && !seen[$1]++ { print $1 "\t" $2 "\t" $3 "\t" $4 }' "$out.raw" >"$out"
   rm -f "$out.raw"
 }
 
@@ -106,9 +244,79 @@ state_of() {
 }
 
 missing() {
-  local file="$1" ctx="$2" st
-  st=$(state_of "$file" "$ctx")
-  [ -z "$st" ]
+  local file="$1" ctx="$2" st desc updated
+  IFS=$'\t' read -r st desc updated < <(awk -F '\t' -v c="$ctx" '
+    $1 == c { print $2 "\t" $3 "\t" $4; exit }
+  ' "$file")
+  if [ -z "${st:-}" ]; then
+    return 0
+  fi
+  if [ "${FORCE_ERRORS:-0}" -eq 1 ] && [ "$st" = "error" ]; then
+    return 0
+  fi
+  if is_redispatchable "$st" "$desc" "$updated"; then
+    return 0
+  fi
+  return 1
+}
+
+admin_relevant() {
+  case "$1" in
+    apps/admin-web/*|apps/web_shared/*|apps/shared_package/generated/*|.github/workflows/admin-web-gate.yml)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+admin_changed() {
+  local sha="$1" path files count n hit
+  files=$(mktemp)
+  hit=0
+  if [ -n "${PR_NUMBER[$sha]:-}" ]; then
+    n="${PR_NUMBER[$sha]}"
+    if ! GH_TOKEN="$GH_TOKEN" gh api --paginate \
+      "repos/${PRIVATE_REPO}/pulls/${n}/files?per_page=100" \
+      --jq '.[].filename' >"$files" 2>/dev/null; then
+      rm -f "$files"
+      return 0
+    fi
+  else
+    if ! GH_TOKEN="$GH_TOKEN" gh api "repos/${PRIVATE_REPO}/commits/${sha}" \
+      --jq '.files[]?.filename' >"$files" 2>/dev/null; then
+      rm -f "$files"
+      return 0
+    fi
+    count=$(grep -c . "$files" || true)
+    if [ "${count:-0}" -ge 300 ]; then
+      rm -f "$files"
+      return 0
+    fi
+  fi
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    if admin_relevant "$path"; then
+      hit=1
+      break
+    fi
+  done <"$files"
+  rm -f "$files"
+  [ "$hit" -eq 1 ]
+}
+
+load_tree() {
+  local sha="$1" dest="$2" cached
+  cached="$tmpdir/tree-${sha}"
+  if [ -f "$cached" ]; then
+    cp "$cached" "$dest"
+    return 0
+  fi
+  if GH_TOKEN="$GH_TOKEN" gh api "repos/${PRIVATE_REPO}/git/trees/${sha}?recursive=1" >"$cached"; then
+    cp "$cached" "$dest"
+    return 0
+  fi
+  rm -f "$cached"
+  return 1
 }
 
 cleanup_poll() {
@@ -121,7 +329,7 @@ cleanup_poll() {
 # Same missing-context dispatch used for an open PR head.
 poll_one() {
   local sha="$1"
-  local states body_ref joined miss app i scope ctx s
+  local states body_ref joined app i scope ctx s
   local flutter_apps i18n_apps visual_apps web_scopes utools_scopes
   flutter_apps=(mail-box shared_package footprint eye-care admin-app water-tracker)
   i18n_apps=(daymica mail-box password-vault yaoxiaobai eye-care footprint water-tracker admin-app shared_package)
@@ -140,232 +348,154 @@ poll_one() {
   latest_states "$sha" "$states"
   body_ref=$(printf '{"ref":"%s","inputs":{"ref":"%s","sha":"%s"' "$DISPATCH_REF" "$sha" "$sha")
 
-  if want quality; then
-    local -a scopes=()
-    missing "$states" "quality/backend" && scopes+=(backend)
-    missing "$states" "quality/website" && scopes+=(website)
-    missing "$states" "quality/flutter-analyze" && scopes+=(flutter)
+  if [ "$STOP_POLL" -eq 0 ] && want quality; then
+    local -a scopes=() qctx=()
+    missing "$states" "quality/backend" && scopes+=(backend) && qctx+=("quality/backend")
+    missing "$states" "quality/website" && scopes+=(website) && qctx+=("quality/website")
+    missing "$states" "quality/flutter-analyze" && scopes+=(flutter) && qctx+=("quality/flutter-analyze")
     if [ "${#scopes[@]}" -gt 0 ]; then
       joined=$(IFS=,; printf '%s' "${scopes[*]}")
-      missing "$states" "quality/backend" && post_pending "$sha" "quality/backend"
-      missing "$states" "quality/website" && post_pending "$sha" "quality/website"
-      missing "$states" "quality/flutter-analyze" && post_pending "$sha" "quality/flutter-analyze"
-      dispatch quality-analyze.yml "${body_ref},\"scopes\":\"${joined}\"}}"
-      if [ "$DISPATCH_OK" -ne 0 ]; then
-        local -a qctx=()
-        for s in "${scopes[@]}"; do
-          case "$s" in
-            backend) qctx+=("quality/backend") ;;
-            website) qctx+=("quality/website") ;;
-            flutter) qctx+=("quality/flutter-analyze") ;;
-          esac
-        done
-        mark_dispatch_failed "$sha" "${qctx[@]}"
-      fi
+      dispatch_contexts "$sha" quality-analyze.yml "${body_ref},\"scopes\":\"${joined}\"}}" "${qctx[@]}"
     fi
   fi
 
-  if want flutter; then
-    local -a need=()
+  if [ "$STOP_POLL" -eq 0 ] && want flutter; then
+    local -a need=() fctx=()
     for app in "${flutter_apps[@]}"; do
       ctx="flutter-test (${app})"
       if missing "$states" "$ctx"; then
-        post_pending "$sha" "$ctx"
         need+=("$app")
+        fctx+=("$ctx")
       fi
     done
     if [ "${#need[@]}" -gt 0 ]; then
       joined=$(IFS=,; printf '%s' "${need[*]}")
-      dispatch flutter-test.yml "${body_ref},\"only\":\"${joined}\"}}"
-      if [ "$DISPATCH_OK" -ne 0 ]; then
-        local -a fctx=()
-        for app in "${need[@]}"; do
-          fctx+=("flutter-test (${app})")
-        done
-        mark_dispatch_failed "$sha" "${fctx[@]}"
-      fi
+      dispatch_contexts "$sha" flutter-test.yml "${body_ref},\"only\":\"${joined}\"}}" "${fctx[@]}"
     fi
   fi
 
-  if want daymica; then
+  if [ "$STOP_POLL" -eq 0 ] && want daymica; then
     need=()
+    local -a dctx=()
     for i in 0 1 2 3 4 5 6 7; do
       ctx="flutter-test (daymica/${i})"
       if missing "$states" "$ctx"; then
-        post_pending "$sha" "$ctx"
         need+=("$i")
+        dctx+=("$ctx")
       fi
     done
     if [ "${#need[@]}" -gt 0 ]; then
       joined=$(IFS=,; printf '%s' "${need[*]}")
-      dispatch daymica-test.yml "${body_ref},\"shards\":\"${joined}\"}}"
-      if [ "$DISPATCH_OK" -ne 0 ]; then
-        local -a dctx=()
-        for i in "${need[@]}"; do
-          dctx+=("flutter-test (daymica/${i})")
-        done
-        mark_dispatch_failed "$sha" "${dctx[@]}"
-      fi
+      dispatch_contexts "$sha" daymica-test.yml "${body_ref},\"shards\":\"${joined}\"}}" "${dctx[@]}"
     fi
   fi
 
-  if want ci-scripts; then
+  if [ "$STOP_POLL" -eq 0 ] && want ci-scripts; then
     if missing "$states" "ci-scripts"; then
-      post_pending "$sha" "ci-scripts"
-      dispatch ci-scripts.yml "${body_ref}}}"
-      if [ "$DISPATCH_OK" -ne 0 ]; then
-        mark_dispatch_failed "$sha" "ci-scripts"
-      fi
+      dispatch_contexts "$sha" ci-scripts.yml "${body_ref}}}" "ci-scripts"
     fi
   fi
 
-  if want i18n; then
+  if [ "$STOP_POLL" -eq 0 ] && want i18n; then
     need=()
+    local -a ictx=()
     for app in "${i18n_apps[@]}"; do
       ctx="i18n-gate (${app})"
       if missing "$states" "$ctx"; then
-        post_pending "$sha" "$ctx"
         need+=("$app")
+        ictx+=("$ctx")
       fi
     done
     if [ "${#need[@]}" -gt 0 ]; then
       joined=$(IFS=,; printf '%s' "${need[*]}")
-      dispatch i18n-gate.yml "${body_ref},\"apps\":\"${joined}\"}}"
-      if [ "$DISPATCH_OK" -ne 0 ]; then
-        local -a ictx=()
-        for app in "${need[@]}"; do
-          ictx+=("i18n-gate (${app})")
-        done
-        mark_dispatch_failed "$sha" "${ictx[@]}"
-      fi
+      dispatch_contexts "$sha" i18n-gate.yml "${body_ref},\"apps\":\"${joined}\"}}" "${ictx[@]}"
     fi
   fi
 
-  if want visual; then
+  if [ "$STOP_POLL" -eq 0 ] && want visual; then
     need=()
+    local -a vctx=()
     for app in "${visual_apps[@]}"; do
       ctx="visual-lint (${app})"
       if missing "$states" "$ctx"; then
-        post_pending "$sha" "$ctx"
         need+=("$app")
+        vctx+=("$ctx")
       fi
     done
     if missing "$states" "golden-tests (shared_package)"; then
-      post_pending "$sha" "golden-tests (shared_package)"
       need+=(golden)
+      vctx+=("golden-tests (shared_package)")
     fi
     if [ "${#need[@]}" -gt 0 ]; then
       joined=$(IFS=,; printf '%s' "${need[*]}")
-      dispatch visual-lint.yml "${body_ref},\"only\":\"${joined}\"}}"
-      if [ "$DISPATCH_OK" -ne 0 ]; then
-        local -a vctx=()
-        for app in "${need[@]}"; do
-          if [ "$app" = golden ]; then
-            vctx+=("golden-tests (shared_package)")
-          else
-            vctx+=("visual-lint (${app})")
-          fi
-        done
-        mark_dispatch_failed "$sha" "${vctx[@]}"
-      fi
+      dispatch_contexts "$sha" visual-lint.yml "${body_ref},\"only\":\"${joined}\"}}" "${vctx[@]}"
     fi
   fi
 
-  if want domain; then
+  if [ "$STOP_POLL" -eq 0 ] && want domain; then
     if missing "$states" "assert domain registry"; then
-      post_pending "$sha" "assert domain registry"
-      dispatch domain-gate.yml "${body_ref}}}"
-      if [ "$DISPATCH_OK" -ne 0 ]; then
-        mark_dispatch_failed "$sha" "assert domain registry"
-      fi
+      dispatch_contexts "$sha" domain-gate.yml "${body_ref}}}" "assert domain registry"
     fi
   fi
 
-  if want web; then
+  if [ "$STOP_POLL" -eq 0 ] && want web; then
     need=()
     for scope in "${web_scopes[@]}"; do
       if missing "$states" "$scope"; then
-        post_pending "$sha" "$scope"
         need+=("$scope")
       fi
     done
     if [ "${#need[@]}" -gt 0 ]; then
       joined=$(IFS=,; printf '%s' "${need[*]}")
-      dispatch web-visual.yml "${body_ref},\"scopes\":\"${joined}\"}}"
-      if [ "$DISPATCH_OK" -ne 0 ]; then
-        mark_dispatch_failed "$sha" "${need[@]}"
-      fi
+      dispatch_contexts "$sha" web-visual.yml "${body_ref},\"scopes\":\"${joined}\"}}" "${need[@]}"
     fi
   fi
 
-  if want utools; then
+  if [ "$STOP_POLL" -eq 0 ] && want utools; then
     need=()
+    local -a uctx=()
     for scope in "${utools_scopes[@]}"; do
       ctx="${utools_ctx[$scope]}"
       if missing "$states" "$ctx"; then
-        post_pending "$sha" "$ctx"
         need+=("$scope")
+        uctx+=("$ctx")
       fi
     done
     if [ "${#need[@]}" -gt 0 ]; then
       joined=$(IFS=,; printf '%s' "${need[*]}")
-      dispatch utools-visual.yml "${body_ref},\"scopes\":\"${joined}\"}}"
-      if [ "$DISPATCH_OK" -ne 0 ]; then
-        local -a uctx=()
-        for scope in "${need[@]}"; do
-          uctx+=("${utools_ctx[$scope]}")
-        done
-        mark_dispatch_failed "$sha" "${uctx[@]}"
-      fi
+      dispatch_contexts "$sha" utools-visual.yml "${body_ref},\"scopes\":\"${joined}\"}}" "${uctx[@]}"
     fi
   fi
 
-  if want gitleaks; then
+  if [ "$STOP_POLL" -eq 0 ] && want gitleaks; then
     if missing "$states" "gitleaks"; then
-      post_pending "$sha" "gitleaks"
-      dispatch gitleaks.yml "${body_ref}}}"
-      if [ "$DISPATCH_OK" -ne 0 ]; then
-        mark_dispatch_failed "$sha" "gitleaks"
-      fi
+      dispatch_contexts "$sha" gitleaks.yml "${body_ref}}}" "gitleaks"
     fi
   fi
 
-  if want admin-web; then
+  if [ "$STOP_POLL" -eq 0 ] && want admin-web; then
     if missing "$states" "validate-admin-web"; then
-      post_pending "$sha" "validate-admin-web"
-      dispatch admin-web-gate.yml "${body_ref}}}"
-      if [ "$DISPATCH_OK" -ne 0 ]; then
-        mark_dispatch_failed "$sha" "validate-admin-web"
+      if admin_changed "$sha"; then
+        dispatch_contexts "$sha" admin-web-gate.yml "${body_ref}}}" "validate-admin-web"
+      else
+        post_status "$sha" success "validate-admin-web" "skipped: no admin-web changes"
       fi
     fi
   fi
 
-  if want scripts; then
+  if [ "$STOP_POLL" -eq 0 ] && want scripts; then
     local tree="$tmpdir/${sha}.tree" ctxfile="$tmpdir/${sha}.ctx"
-    if GH_TOKEN="$GH_TOKEN" gh api "repos/${PRIVATE_REPO}/git/trees/${sha}?recursive=1" >"$tree" \
+    if load_tree "$sha" "$tree" \
       && python3 .github/scripts/scripts_gate_run.py --contexts "$tree" "$ctxfile" >/dev/null; then
-      miss=0
+      local -a sctx=()
       while IFS= read -r ctx; do
         [ -n "$ctx" ] || continue
         if missing "$states" "$ctx"; then
-          post_pending "$sha" "$ctx"
-          miss=1
+          sctx+=("$ctx")
         fi
       done <"$ctxfile"
-      if [ "$miss" -eq 1 ]; then
-        dispatch scripts-gate.yml "${body_ref},\"force\":\"false\"}}"
-        if [ "$DISPATCH_OK" -ne 0 ]; then
-          local -a sctx=()
-          while IFS= read -r ctx; do
-            [ -n "$ctx" ] || continue
-            if missing "$states" "$ctx"; then
-              sctx+=("$ctx")
-            fi
-          done <"$ctxfile"
-          if [ "${#sctx[@]}" -gt 0 ]; then
-            mark_dispatch_failed "$sha" "${sctx[@]}"
-          fi
-        fi
+      if [ "${#sctx[@]}" -gt 0 ]; then
+        dispatch_contexts "$sha" scripts-gate.yml "${body_ref},\"force\":\"false\"}}" "${sctx[@]}"
       fi
     else
       echo "FAIL scripts-list"
@@ -400,17 +530,33 @@ run_poll() {
     exit 1
   fi
 
-  local -a pr_shas=()
-  mapfile -t pr_shas < <(GH_TOKEN="$GH_TOKEN" gh api --paginate \
-    "repos/${PRIVATE_REPO}/pulls?state=open&per_page=100" --jq '.[].head.sha')
+  local -a pr_rows=()
+  mapfile -t pr_rows < <(GH_TOKEN="$GH_TOKEN" gh api --paginate \
+    "repos/${PRIVATE_REPO}/pulls?state=open&per_page=100" \
+    --jq '.[] | [.number, .head.sha] | @tsv')
 
+  PR_NUMBER=()
   local -A seen=()
   local -a prs=()
-  if [ "${#pr_shas[@]}" -gt 0 ]; then
-    for s in "${pr_shas[@]}"; do
+  local row n want_sha found
+  local -a only_prs=()
+  if [ "${#pr_rows[@]}" -gt 0 ]; then
+    for row in "${pr_rows[@]}"; do
+      [ -n "$row" ] || continue
+      n=""
+      s=""
+      if [[ "$row" == *$'\t'* ]]; then
+        n=${row%%$'\t'*}
+        s=${row#*$'\t'}
+      else
+        s=$row
+      fi
       s=$(printf '%s' "$s" | tr 'A-F' 'a-f' | tr -d '[:space:]')
       if ! printf '%s' "$s" | grep -Eq '^[0-9a-f]{40}$'; then
         continue
+      fi
+      if printf '%s' "$n" | grep -Eq '^[0-9]+$'; then
+        PR_NUMBER[$s]=$n
       fi
       # The default-branch head is decided once, even if a PR lists it.
       if [ "$s" = "$main_sha" ]; then
@@ -423,22 +569,85 @@ run_poll() {
     done
   fi
 
+  want_sha=$(printf '%s' "${SHA_INPUT:-}" | tr 'A-F' 'a-f' | tr -d '[:space:]')
+  if [ -n "$want_sha" ] && ! printf '%s' "$want_sha" | grep -Eq '^[0-9a-f]{40}$'; then
+    echo "FAIL poll sha"
+    exit 1
+  fi
+  case "${FORCE:-false}" in
+    true|True|TRUE) FORCE_ERRORS=1 ;;
+    false|False|FALSE|"") FORCE_ERRORS=0 ;;
+    *) echo "FAIL poll force"; exit 1 ;;
+  esac
+  if [ "$FORCE_ERRORS" -eq 1 ] && [ -z "$want_sha" ]; then
+    echo "FAIL poll force"
+    exit 1
+  fi
+  if [ -n "$want_sha" ]; then
+    if [ "$want_sha" = "$main_sha" ]; then
+      prs=()
+    else
+      found=0
+      only_prs=()
+      for s in "${prs[@]+"${prs[@]}"}"; do
+        if [ "$s" = "$want_sha" ]; then
+          only_prs+=("$s")
+          found=1
+        fi
+      done
+      if [ "$found" -ne 1 ]; then
+        echo "FAIL poll sha"
+        exit 1
+      fi
+      prs=("${only_prs[@]}")
+    fi
+  fi
+
   cleanup_poll
   tmpdir=$(mktemp -d)
-  local head_states="$tmpdir/head.tsv" skip=0 total
+  STOP_POLL=0
+  RATE_REMAINING=""
+  local head_states="$tmpdir/head.tsv" skip=0 total active rem need
   latest_states "$main_sha" "$head_states"
-  if has_builder_status "$head_states"; then
+  if [ -n "$want_sha" ] && [ "$want_sha" != "$main_sha" ]; then
+    skip=1
+  elif [ "$FORCE_ERRORS" -ne 1 ] && has_builder_status "$head_states" \
+    && ! has_redispatch_gap "$head_states"; then
     skip=1
   fi
-  total=$(( ${#prs[@]} + 1 ))
+  if [ -n "$want_sha" ]; then
+    total=1
+  else
+    total=$(( ${#prs[@]} + 1 ))
+  fi
   echo "PASS poll shas=${total}"
   echo "PASS poll skip=${skip}"
+
+  active=${#prs[@]}
+  if [ "$skip" -eq 0 ]; then
+    active=$((active + 1))
+  fi
+  if [ "$active" -gt 0 ]; then
+    rem=$(GH_TOKEN="$DISPATCH_TOKEN" gh api rate_limit --jq '.resources.core.remaining' 2>/dev/null || true)
+    if printf '%s' "$rem" | grep -Eq '^[0-9]+$'; then
+      RATE_REMAINING=$rem
+      need=$((12 * active + 200))
+      if [ "$RATE_REMAINING" -lt "$need" ]; then
+        echo "FAIL poll rate-limited"
+        cleanup_poll
+        exit 0
+      fi
+    fi
+  fi
 
   if [ "$skip" -eq 0 ]; then
     poll_one "$main_sha"
   fi
-  if [ "${#prs[@]}" -gt 0 ]; then
+  if [ "$STOP_POLL" -eq 0 ] && [ "${#prs[@]}" -gt 0 ]; then
     for s in "${prs[@]}"; do
+      if [ "$STOP_POLL" -ne 0 ]; then
+        break
+      fi
       poll_one "$s"
     done
   fi
@@ -480,6 +689,11 @@ selftest() {
     || ! grep -Fq 'gitleaks.yml' "$script_dir/purge-gate-logs.sh" \
     || ! grep -Fq 'admin-web-gate.yml' "$script_dir/purge-gate-logs.sh"; then
     echo "FAIL selftest-purge"
+    exit 1
+  fi
+  if ! grep -Fq 'Must be an open PR head or main' "$wf" \
+    || ! grep -Fq 'redispatch missing and error contexts' "$wf"; then
+    echo "FAIL selftest-input"
     exit 1
   fi
 
@@ -527,6 +741,8 @@ selftest() {
   export DISPATCH_REF='selftest'
   export RUN_URL='run-local'
   export ONLY=''
+  export SHA_INPUT=''
+  export FORCE=false
   local HEAD PR
   HEAD='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
   PR='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
@@ -535,6 +751,12 @@ selftest() {
     TEST_DIR=$(mktemp -d)
     export FAKE_LOG="$TEST_DIR/log"
     export FAKE_STATUSES="$TEST_DIR/statuses"
+    export SHA_INPUT=''
+    export FORCE=false
+    export FAKE_DISPATCH_HTTP=200
+    export FAKE_RATE_REMAINING=5000
+    unset FAKE_RATE_HEADER || true
+    unset FAKE_COMMIT_FILE || true
     : >"$FAKE_LOG"
     : >"$FAKE_STATUSES"
     cat >"$TEST_DIR/gh" <<'EOF'
@@ -545,41 +767,76 @@ method=GET
 url=""
 context=""
 state=""
+desc=""
+verbose=0
 prev=""
 for a in "$@"; do
-  if [ "$prev" = "--method" ]; then
+  if [ "$a" = "-i" ]; then
+    verbose=1
+  elif [ "$prev" = "--method" ]; then
     method=$a
   elif [ "$prev" = "-f" ]; then
     case "$a" in
       context=*) context=${a#context=} ;;
       state=*) state=${a#state=} ;;
+      description=*) desc=${a#description=} ;;
     esac
+  elif [ "$a" = "rate_limit" ]; then
+    url=$a
   elif [[ "$a" == repos/* ]]; then
     url=$a
   fi
   prev=$a
 done
+if [ "$url" = "rate_limit" ]; then
+  printf '%s\n' "${FAKE_RATE_REMAINING:-5000}"
+  exit 0
+fi
 if [ "$method" = POST ] && [[ "$url" == *"/dispatches" ]]; then
   body=$(cat)
   wf=$(printf '%s' "$url" | sed -n 's|.*/workflows/\([^/]*\)/dispatches|\1|p')
   printf 'dispatch\t%s\t%s\n' "$wf" "$body" >>"$log"
+  code="${FAKE_DISPATCH_HTTP:-200}"
+  if [ "$code" != "200" ]; then
+    echo "gh: request failed (HTTP ${code})" >&2
+    exit 1
+  fi
+  if [ "$verbose" = 1 ] && [ -n "${FAKE_RATE_HEADER:-}" ]; then
+    printf 'HTTP/2.0 204 No Content\nX-RateLimit-Remaining: %s\n\n' "$FAKE_RATE_HEADER"
+  fi
   exit 0
 fi
 if [ "$method" = POST ] && [[ "$url" == *"/statuses/"* ]]; then
   sha=${url##*/}
-  printf 'status\t%s\t%s\t%s\n' "$sha" "$context" "$state" >>"$log"
+  printf 'status\t%s\t%s\t%s\t%s\n' "$sha" "$context" "$state" "$desc" >>"$log"
   exit 0
 fi
 if [[ "$url" == *"/commits/"*"/statuses?"* ]]; then
   sha=$(printf '%s' "$url" | sed -n 's|.*/commits/\([0-9a-fA-F]\{40\}\)/statuses.*|\1|p')
   sha=$(printf '%s' "$sha" | tr 'A-F' 'a-f')
   if [ -f "${FAKE_STATUSES:?}" ]; then
-    awk -F '\t' -v s="$sha" '$1==s { print $2 "\t" $3 }' "$FAKE_STATUSES"
+    awk -F '\t' -v s="$sha" '$1==s { print $2 "\t" $3 "\t" $4 "\t" $5 }' "$FAKE_STATUSES"
   fi
   exit 0
 fi
 if [[ "$url" == *"/commits/main" ]]; then
   printf '%s' "${FAKE_MAIN_SHA-}"
+  exit 0
+fi
+if [[ "$url" == *"/commits/"* ]]; then
+  if [ -n "${FAKE_COMMIT_FILE:-}" ]; then
+    cat "$FAKE_COMMIT_FILE"
+  else
+    printf '%s\n' 'apps/admin-web/src/App.tsx'
+  fi
+  exit 0
+fi
+if [[ "$url" == *"/pulls/"*"/files"* ]]; then
+  if [ -n "${FAKE_COMMIT_FILE:-}" ]; then
+    cat "$FAKE_COMMIT_FILE"
+  else
+    printf '%s\n' 'apps/admin-web/src/App.tsx'
+  fi
   exit 0
 fi
 if [[ "$url" == *"/pulls?"* ]]; then
@@ -589,6 +846,7 @@ if [[ "$url" == *"/pulls?"* ]]; then
   exit 0
 fi
 if [[ "$url" == *"/git/trees/"* ]]; then
+  printf 'tree\t%s\n' "$url" >>"$log"
   printf '%s' '{"truncated":false,"tree":[{"path":"scripts/lib/assert-scripts-layout.ps1","type":"blob"},{"path":"scripts/lib/assert-domain-registry.ps1","type":"blob"},{"path":"scripts/layout.tests.ps1","type":"blob"}]}'
   exit 0
 fi
@@ -604,6 +862,7 @@ EOF
     set +e
     (
       hash -r
+      # shellcheck disable=SC2030
       export PATH="$TEST_DIR:$PATH"
       run_poll
     ) >"$TEST_OUT" 2>"$TEST_ERR"
@@ -683,7 +942,7 @@ EOF
     exit 1
   fi
   local replay="$TEST_DIR/replay.tsv"
-  awk -F '\t' '$1=="status" { print $2 "\t" $3 "\t" $4 }' "$FAKE_LOG" >"$replay"
+  awk -F '\t' '$1=="status" { print $2 "\t" $3 "\t" $4 "\t" $5 "\t" }' "$FAKE_LOG" >"$replay"
 
   # Statuses this run just posted, including pending, skip the next pass.
   prepare
@@ -725,7 +984,7 @@ EOF
   fi
 
   prepare
-  printf '%s\t%s\t%s\n' "$HEAD" 'ci-scripts' 'error' >"$FAKE_STATUSES"
+  printf '%s\t%s\t%s\t%s\n' "$HEAD" 'ci-scripts' 'error' 'failure' >"$FAKE_STATUSES"
   export FAKE_MAIN_SHA="$HEAD" FAKE_PR_SHAS='' ONLY='' PR_USED=''
   execute
   check_quiet error-skip
@@ -850,6 +1109,194 @@ EOF
   check_quiet badhead
   if [ "$TEST_RC" -eq 0 ] || ! grep -Fxq 'FAIL poll head' "$TEST_OUT"; then
     echo "FAIL selftest-badhead"
+    exit 1
+  fi
+
+  if admin_relevant 'apps/admin-web/src/App.tsx' \
+    && admin_relevant 'apps/web_shared/src/a.ts' \
+    && admin_relevant 'apps/shared_package/generated/a.dart' \
+    && admin_relevant '.github/workflows/admin-web-gate.yml' \
+    && ! admin_relevant 'apps/daymica/lib/main.dart' \
+    && ! admin_relevant 'README.md'; then
+    :
+  else
+    echo "FAIL selftest-admin-path"
+    exit 1
+  fi
+
+  # error "dispatch failed" is missing and is dispatched again.
+  prepare
+  printf '%s\t%s\t%s\t%s\n' "$HEAD" 'ci-scripts' 'error' 'dispatch failed' >"$FAKE_STATUSES"
+  export FAKE_MAIN_SHA="$HEAD" FAKE_PR_SHAS='' ONLY='ci-scripts' PR_USED=''
+  execute
+  check_quiet error-redispatch
+  if [ "$TEST_RC" -ne 0 ] || ! grep -Fxq 'PASS poll skip=0' "$TEST_OUT" \
+    || [ "$(dispatch_count ci-scripts.yml "$HEAD")" != 1 ] \
+    || [ "$(awk -F '\t' '$1=="status" && $4=="error" { n++ } END { print n+0 }' "$FAKE_LOG")" != 0 ]; then
+    echo "FAIL selftest-error-redispatch"
+    exit 1
+  fi
+
+  prepare
+  printf '%s\t%s\t%s\t%s\n' "$HEAD" 'ci-scripts' 'error' 'report rate-limited' >"$FAKE_STATUSES"
+  export FAKE_MAIN_SHA="$HEAD" FAKE_PR_SHAS='' ONLY='ci-scripts' PR_USED=''
+  execute
+  check_quiet report-redispatch
+  if [ "$TEST_RC" -ne 0 ] || [ "$(dispatch_count ci-scripts.yml "$HEAD")" != 1 ]; then
+    echo "FAIL selftest-report-redispatch"
+    exit 1
+  fi
+
+  # A pending marker older than 90 minutes is dispatched again.
+  prepare
+  old=$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+  printf '%s\t%s\t%s\t%s\t%s\n' "$HEAD" 'quality/backend' 'success' 'success' "$old" >"$FAKE_STATUSES"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$HEAD" 'ci-scripts' 'pending' 'queued' "$old" >>"$FAKE_STATUSES"
+  export FAKE_MAIN_SHA="$HEAD" FAKE_PR_SHAS='' ONLY='ci-scripts' PR_USED=''
+  execute
+  check_quiet pending-expired
+  if [ "$TEST_RC" -ne 0 ] || ! grep -Fxq 'PASS poll skip=0' "$TEST_OUT" \
+    || [ "$(dispatch_count ci-scripts.yml "$HEAD")" != 1 ] \
+    || [ "$(dispatch_count quality-analyze.yml "$HEAD")" != 0 ]; then
+    echo "FAIL selftest-pending-expired"
+    exit 1
+  fi
+
+  prepare
+  fresh=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  printf '%s\t%s\t%s\t%s\t%s\n' "$HEAD" 'ci-scripts' 'pending' 'running' "$fresh" >"$FAKE_STATUSES"
+  export FAKE_MAIN_SHA="$HEAD" FAKE_PR_SHAS='' ONLY='ci-scripts' PR_USED=''
+  execute
+  check_quiet pending-fresh
+  if [ "$TEST_RC" -ne 0 ] || ! grep -Fxq 'PASS poll skip=1' "$TEST_OUT" \
+    || [ "$(dispatch_count ci-scripts.yml "$HEAD")" != 0 ]; then
+    echo "FAIL selftest-pending-fresh"
+    exit 1
+  fi
+
+  # 403 writes no error status and does not dispatch the next head.
+  prepare
+  export FAKE_DISPATCH_HTTP=403
+  export FAKE_MAIN_SHA="$HEAD" FAKE_PR_SHAS="$PR" ONLY='ci-scripts' PR_USED=1
+  execute
+  check_quiet dispatch-rate
+  if [ "$TEST_RC" -ne 0 ] || ! grep -Fxq 'FAIL poll rate-limited' "$TEST_OUT" \
+    || [ "$(dispatch_count ci-scripts.yml "$HEAD")" != 1 ] \
+    || [ "$(dispatch_count ci-scripts.yml "$PR")" != 0 ] \
+    || [ "$(status_count "$HEAD")" != 0 ] \
+    || [ "$(status_count "$PR")" != 0 ]; then
+    echo "FAIL selftest-dispatch-rate"
+    exit 1
+  fi
+
+  # Other dispatch failures still record error and the round continues.
+  prepare
+  export FAKE_DISPATCH_HTTP=500
+  export FAKE_MAIN_SHA="$HEAD" FAKE_PR_SHAS="$PR" ONLY='ci-scripts' PR_USED=1
+  execute
+  check_quiet dispatch-error
+  if [ "$TEST_RC" -ne 0 ] || grep -Fxq 'FAIL poll rate-limited' "$TEST_OUT" \
+    || [ "$(dispatch_count ci-scripts.yml "$HEAD")" != 1 ] \
+    || [ "$(dispatch_count ci-scripts.yml "$PR")" != 1 ] \
+    || [ "$(awk -F '\t' -v s="$HEAD" '$1=="status" && $2==s && $3=="ci-scripts" && $4=="error" && $5=="dispatch failed" { n++ } END { print n+0 }' "$FAKE_LOG")" != 1 ]; then
+    echo "FAIL selftest-dispatch-error"
+    exit 1
+  fi
+
+  prepare
+  export FAKE_RATE_REMAINING=10
+  export FAKE_MAIN_SHA="$HEAD" FAKE_PR_SHAS='' ONLY='' PR_USED=''
+  execute
+  check_quiet poll-budget
+  if [ "$TEST_RC" -ne 0 ] || ! grep -Fxq 'FAIL poll rate-limited' "$TEST_OUT" \
+    || [ "$(awk -F '\t' '$1=="dispatch" { n++ } END { print n+0 }' "$FAKE_LOG")" != 0 ]; then
+    echo "FAIL selftest-poll-budget"
+    exit 1
+  fi
+
+  prepare
+  export FAKE_RATE_HEADER=10
+  export FAKE_MAIN_SHA="$HEAD" FAKE_PR_SHAS='' ONLY='' PR_USED=''
+  execute
+  check_quiet poll-header
+  if [ "$TEST_RC" -ne 0 ] || ! grep -Fxq 'FAIL poll rate-limited' "$TEST_OUT" \
+    || [ "$(awk -F '\t' '$1=="dispatch" { n++ } END { print n+0 }' "$FAKE_LOG")" != 1 ] \
+    || [ "$(dispatch_count quality-analyze.yml "$HEAD")" != 1 ] \
+    || [ "$(dispatch_count flutter-test.yml "$HEAD")" != 0 ]; then
+    echo "FAIL selftest-poll-header"
+    exit 1
+  fi
+
+  prepare
+  printf '%s\n' 'README.md' >"$TEST_DIR/files"
+  export FAKE_COMMIT_FILE="$TEST_DIR/files"
+  export FAKE_MAIN_SHA="$HEAD" FAKE_PR_SHAS='' ONLY='admin-web' PR_USED=''
+  execute
+  check_quiet admin-skip
+  if [ "$TEST_RC" -ne 0 ] || [ "$(dispatch_count admin-web-gate.yml "$HEAD")" != 0 ] \
+    || [ "$(awk -F '\t' -v s="$HEAD" '$1=="status" && $2==s && $3=="validate-admin-web" && $4=="success" && $5=="skipped: no admin-web changes" { n++ } END { print n+0 }' "$FAKE_LOG")" != 1 ]; then
+    echo "FAIL selftest-admin-skip"
+    exit 1
+  fi
+
+  prepare
+  export SHA_INPUT='cccccccccccccccccccccccccccccccccccccccc' FORCE=false
+  export FAKE_MAIN_SHA="$HEAD" FAKE_PR_SHAS='' ONLY='' PR_USED=''
+  execute
+  check_quiet bad-sha
+  if [ "$TEST_RC" -eq 0 ] || ! grep -Fxq 'FAIL poll sha' "$TEST_OUT"; then
+    echo "FAIL selftest-bad-sha"
+    exit 1
+  fi
+
+  prepare
+  export FORCE=true SHA_INPUT=''
+  export FAKE_MAIN_SHA="$HEAD" FAKE_PR_SHAS='' ONLY='' PR_USED=''
+  execute
+  check_quiet force-need-sha
+  if [ "$TEST_RC" -eq 0 ] || ! grep -Fxq 'FAIL poll force' "$TEST_OUT"; then
+    echo "FAIL selftest-force-need-sha"
+    exit 1
+  fi
+
+  prepare
+  printf '%s\t%s\t%s\t%s\n' "$HEAD" 'ci-scripts' 'error' 'tests failed' >"$FAKE_STATUSES"
+  export SHA_INPUT="$HEAD" FORCE=true
+  export FAKE_MAIN_SHA="$HEAD" FAKE_PR_SHAS='' ONLY='ci-scripts' PR_USED=''
+  execute
+  check_quiet force-error
+  if [ "$TEST_RC" -ne 0 ] || ! grep -Fxq 'PASS poll shas=1' "$TEST_OUT" \
+    || [ "$(dispatch_count ci-scripts.yml "$HEAD")" != 1 ]; then
+    echo "FAIL selftest-force-error"
+    exit 1
+  fi
+
+  prepare
+  export SHA_INPUT="$PR"
+  export FAKE_MAIN_SHA="$HEAD" FAKE_PR_SHAS="$PR" ONLY='ci-scripts' PR_USED=1
+  execute
+  check_quiet sha-pr
+  if [ "$TEST_RC" -ne 0 ] || ! grep -Fxq 'PASS poll shas=1' "$TEST_OUT" \
+    || [ "$(dispatch_count ci-scripts.yml "$PR")" != 1 ] \
+    || [ "$(dispatch_count ci-scripts.yml "$HEAD")" != 0 ]; then
+    echo "FAIL selftest-sha-pr"
+    exit 1
+  fi
+
+  prepare
+  export FAKE_MAIN_SHA="$HEAD" FAKE_PR_SHAS='' ONLY='' PR_USED=''
+  # shellcheck disable=SC2031
+  old_path=$PATH
+  # shellcheck disable=SC2031
+  PATH="$TEST_DIR:$PATH"
+  tmpdir=$(mktemp -d)
+  load_tree "$HEAD" "$tmpdir/a"
+  load_tree "$HEAD" "$tmpdir/b"
+  rm -rf "$tmpdir"
+  tmpdir=""
+  PATH=$old_path
+  if [ "$(awk -F '\t' '$1=="tree" { n++ } END { print n+0 }' "$FAKE_LOG")" != 1 ]; then
+    echo "FAIL selftest-tree-cache"
     exit 1
   fi
 

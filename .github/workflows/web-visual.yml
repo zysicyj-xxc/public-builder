@@ -47,7 +47,7 @@ jobs:
   meta:
     name: resolve-payload
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
       ref: ${{ steps.resolve.outputs.ref }}
@@ -92,31 +92,6 @@ jobs:
           print("PASS scopes count=" + str(len(scopes)))
           PY
 
-      - name: Set pending statuses
-        env:
-          SHA: ${{ steps.resolve.outputs.sha }}
-          SCOPES: ${{ steps.pick.outputs.scopes }}
-          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
-            echo "FAIL sha" >&2
-            exit 1
-          fi
-          for scope in ${SCOPES}; do
-            case "$scope" in
-              tokens|web-shared|website) ;;
-              *) echo "FAIL scopes" >&2; exit 1 ;;
-            esac
-            gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
-              -f state="pending" \
-              -f target_url="${RUN_URL}" \
-              -f description="running" \
-              -f context="$scope" >/dev/null
-          done
-          echo "PASS pending"
-
       - name: Post failure when resolve fails
         if: failure()
         env:
@@ -134,12 +109,26 @@ jobs:
             echo "no allowlisted sha; dispatcher pending left in place"
             exit 0
           fi
+          mark="${RUNNER_TEMP}/rate-limited"
+          rm -f "$mark"
+          post() {
+            local ctx="$1" out rc
+            if [ -f "$mark" ]; then
+              bash .github/scripts/api-retry.sh post-limited "$sha" "$RUN_URL" "$ctx"
+              return
+            fi
+            set +e
+            out=$(bash .github/scripts/api-retry.sh status "$sha" failure "$ctx" "payload rejected" "$RUN_URL")
+            rc=$?
+            set -e
+            printf '%s\n' "$out"
+            if printf '%s\n' "$out" | grep -Fxq 'FAIL report rate-limited'; then
+              : >"$mark"
+            fi
+            return "$rc"
+          }
           for ctx in tokens web-shared website; do
-            gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${sha}" \
-              -f state="failure" \
-              -f target_url="${RUN_URL}" \
-              -f description="payload rejected" \
-              -f context="${ctx}" >/dev/null
+            post "$ctx"
           done
 
   tokens:
@@ -311,8 +300,12 @@ jobs:
     needs: [meta, tokens, web-shared, website]
     if: always() && needs.meta.result == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
       - name: Post conclusions
         env:
           SHA: ${{ needs.meta.outputs.sha }}
@@ -338,12 +331,22 @@ jobs:
               *) state=failure; desc=failure ;;
             esac
             echo "status ${state}"
-            gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
-              -f state="$state" \
-              -f target_url="${RUN_URL}" \
-              -f description="$desc" \
-              -f context="$ctx" >/dev/null
+            if [ -f "${RUNNER_TEMP}/rate-limited" ]; then
+              bash .github/scripts/api-retry.sh post-limited "$SHA" "$RUN_URL" "$ctx"
+              return 0
+            fi
+            local out rc
+            set +e
+            out=$(bash .github/scripts/api-retry.sh status "$SHA" "$state" "$ctx" "$desc" "$RUN_URL")
+            rc=$?
+            set -e
+            printf '%s\n' "$out"
+            if printf '%s\n' "$out" | grep -Fxq 'FAIL report rate-limited'; then
+              : >"${RUNNER_TEMP}/rate-limited"
+            fi
+            return "$rc"
           }
+          rm -f "${RUNNER_TEMP}/rate-limited"
           post tokens "$TOKENS"
           post web-shared "$WEB_SHARED"
           post website "$WEBSITE"

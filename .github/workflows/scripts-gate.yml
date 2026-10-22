@@ -50,7 +50,7 @@ jobs:
   meta:
     name: resolve-payload
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
       ref: ${{ steps.resolve.outputs.ref }}
@@ -85,46 +85,6 @@ jobs:
           gh api "repos/zysicyj-xxc/zysicyj/git/trees/${SHA}?recursive=1" > "$RUNNER_TEMP/tree.json"
           python3 .github/scripts/scripts_gate_run.py --from-tree "$RUNNER_TEMP/tree.json" "$GITHUB_OUTPUT"
 
-      - name: Set pending statuses
-        env:
-          SHA: ${{ steps.resolve.outputs.sha }}
-          TESTS_JSON: ${{ steps.list.outputs.tests }}
-          FORCE: ${{ github.event.inputs.force || 'true' }}
-          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
-            echo "ERROR: sha failed allowlist" >&2
-            exit 1
-          fi
-          states=$(mktemp)
-          gh api --paginate "repos/zysicyj-xxc/zysicyj/commits/${SHA}/statuses?per_page=100" \
-            --jq '.[] | [.context, .state] | @tsv' >"$states.raw" || true
-          awk -F '\t' 'NF>=2 && !seen[$1]++ { print $1 "\t" $2 }' "$states.raw" >"$states"
-          rm -f "$states.raw"
-          post() {
-            if [ "$FORCE" = "false" ]; then
-              st=$(awk -F '\t' -v c="$1" '$1==c { print $2; exit }' "$states")
-              case "$st" in
-                success|failure|error) return 0 ;;
-              esac
-            fi
-            gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
-              -f state="pending" \
-              -f target_url="${RUN_URL}" \
-              -f description="running" \
-              -f context="$1" >/dev/null
-          }
-          post "layout + domain gates"
-          echo "$TESTS_JSON" | jq -er '.[]' | while IFS= read -r ctx; do
-            if ! printf '%s' "$ctx" | grep -Eq '^scripts/([A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\.tests\.ps1$'; then
-              echo "ERROR: test path failed allowlist" >&2
-              exit 1
-            fi
-            post "$ctx"
-          done
-
       - name: Post failure when resolve fails
         if: failure()
         env:
@@ -143,12 +103,23 @@ jobs:
             echo "no allowlisted sha; dispatcher pending left in place"
             exit 0
           fi
+          mark="${RUNNER_TEMP}/rate-limited"
+          rm -f "$mark"
           post() {
-            gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${sha}" \
-              -f state="failure" \
-              -f target_url="${RUN_URL}" \
-              -f description="payload rejected" \
-              -f context="$1" >/dev/null
+            local ctx="$1" out rc
+            if [ -f "$mark" ]; then
+              bash .github/scripts/api-retry.sh post-limited "$sha" "$RUN_URL" "$ctx"
+              return
+            fi
+            set +e
+            out=$(bash .github/scripts/api-retry.sh status "$sha" failure "$ctx" "payload rejected" "$RUN_URL")
+            rc=$?
+            set -e
+            printf '%s\n' "$out"
+            if printf '%s\n' "$out" | grep -Fxq 'FAIL report rate-limited'; then
+              : >"$mark"
+            fi
+            return "$rc"
           }
           post "layout + domain gates"
           if [ -n "${TESTS_JSON:-}" ]; then
@@ -245,8 +216,12 @@ jobs:
     needs: [meta, verify]
     if: always() && needs.meta.result == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
       - name: Download results
         if: always()
         uses: actions/download-artifact@v4
@@ -288,14 +263,24 @@ jobs:
               got_desc["$ctx"]=$desc
             done < gate-results/results.tsv
           fi
+          mark="${RUNNER_TEMP}/rate-limited"
+          rm -f "$mark"
           post() {
-            local ctx="$1" state="$2" desc="$3"
+            local ctx="$1" state="$2" desc="$3" out rc
             echo "status ${state} ${desc}"
-            gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
-              -f state="$state" \
-              -f target_url="${RUN_URL}" \
-              -f description="$desc" \
-              -f context="$ctx" >/dev/null
+            if [ -f "$mark" ]; then
+              bash .github/scripts/api-retry.sh post-limited "$SHA" "$RUN_URL" "$ctx"
+              return 0
+            fi
+            set +e
+            out=$(bash .github/scripts/api-retry.sh status "$SHA" "$state" "$ctx" "$desc" "$RUN_URL")
+            rc=$?
+            set -e
+            printf '%s\n' "$out"
+            if printf '%s\n' "$out" | grep -Fxq 'FAIL report rate-limited'; then
+              : >"$mark"
+            fi
+            return "$rc"
           }
           post_one() {
             local ctx="$1"

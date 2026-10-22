@@ -40,7 +40,7 @@ jobs:
   meta:
     name: resolve-payload
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
       base: ${{ steps.range.outputs.base }}
@@ -70,24 +70,6 @@ jobs:
           GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
         run: bash .github/scripts/gitleaks-range.sh
 
-      - name: Set pending status
-        env:
-          SHA: ${{ steps.resolve.outputs.sha }}
-          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
-            echo "FAIL sha" >&2
-            exit 1
-          fi
-          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
-            -f state="pending" \
-            -f target_url="${RUN_URL}" \
-            -f description="running on public-builder" \
-            -f context="gitleaks" >/dev/null
-          echo "PASS pending"
-
       - name: Post failure when resolve fails
         if: failure()
         env:
@@ -105,11 +87,7 @@ jobs:
             echo "FAIL status nosha"
             exit 0
           fi
-          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${sha}" \
-            -f state="failure" \
-            -f target_url="${RUN_URL}" \
-            -f description="payload rejected" \
-            -f context="gitleaks" >/dev/null
+          bash .github/scripts/api-retry.sh status "$sha" failure "gitleaks" "payload rejected" "$RUN_URL"
           echo "FAIL status failure"
 
   scan:
@@ -172,8 +150,12 @@ jobs:
     needs: [meta, scan]
     if: always() && needs.meta.result == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
       - name: Post conclusion
         env:
           SHA: ${{ needs.meta.outputs.sha }}
@@ -191,11 +173,7 @@ jobs:
             cancelled) state=failure; desc=cancelled ;;
             *) state=failure; desc=failure ;;
           esac
-          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
-            -f state="$state" \
-            -f target_url="${RUN_URL}" \
-            -f description="$desc" \
-            -f context="gitleaks" >/dev/null
+          bash .github/scripts/api-retry.sh status "$SHA" "$state" "gitleaks" "$desc" "$RUN_URL"
           if [ "$state" = success ]; then
             echo "PASS status success"
           else

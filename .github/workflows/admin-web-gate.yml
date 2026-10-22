@@ -5,8 +5,9 @@
 # `pnpm install --frozen-lockfile --ignore-scripts`. Then in apps/admin-web:
 # typecheck, test, build, and dist/index.html must exist.
 # The private workflow only runs for apps/admin-web/**, apps/web_shared/**,
-# apps/shared_package/generated/**, and itself. Poll does not filter by
-# path: every dispatched SHA gets this status.
+# apps/shared_package/generated/**, and itself. Poll dispatches this gate
+# only when the head touches those paths or this workflow file. Otherwise
+# poll writes validate-admin-web success, "skipped: no admin-web changes".
 # Trust boundary: repository_dispatch and workflow_dispatch inputs are untrusted.
 # Status posts use PRIVATE_REPO_ACCESS_TOKEN on a job that does not run the app.
 # Commit-status context: validate-admin-web.
@@ -42,7 +43,7 @@ jobs:
   meta:
     name: resolve-payload
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
     steps:
@@ -62,24 +63,6 @@ jobs:
           sha: ${{ github.event.client_payload.sha || github.event.inputs.sha }}
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
 
-      - name: Set pending status
-        env:
-          SHA: ${{ steps.resolve.outputs.sha }}
-          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
-            echo "FAIL sha" >&2
-            exit 1
-          fi
-          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
-            -f state="pending" \
-            -f target_url="${RUN_URL}" \
-            -f description="running on public-builder" \
-            -f context="validate-admin-web" >/dev/null
-          echo "PASS pending"
-
       - name: Post failure when resolve fails
         if: failure()
         env:
@@ -97,11 +80,7 @@ jobs:
             echo "FAIL status nosha"
             exit 0
           fi
-          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${sha}" \
-            -f state="failure" \
-            -f target_url="${RUN_URL}" \
-            -f description="payload rejected" \
-            -f context="validate-admin-web" >/dev/null
+          bash .github/scripts/api-retry.sh status "$sha" failure "validate-admin-web" "payload rejected" "$RUN_URL"
           echo "FAIL status failure"
 
   verify:
@@ -146,8 +125,12 @@ jobs:
     needs: [meta, verify]
     if: always() && needs.meta.result == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
       - name: Post conclusion
         env:
           SHA: ${{ needs.meta.outputs.sha }}
@@ -165,11 +148,7 @@ jobs:
             cancelled) state=failure; desc=cancelled ;;
             *) state=failure; desc=failure ;;
           esac
-          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
-            -f state="$state" \
-            -f target_url="${RUN_URL}" \
-            -f description="$desc" \
-            -f context="validate-admin-web" >/dev/null
+          bash .github/scripts/api-retry.sh status "$SHA" "$state" "validate-admin-web" "$desc" "$RUN_URL"
           if [ "$state" = success ]; then
             echo "PASS status success"
           else

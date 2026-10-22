@@ -99,36 +99,6 @@ jobs:
           print("PASS apps count=" + str(len(apps)))
           PY
 
-      - name: Set pending statuses
-        env:
-          SHA: ${{ steps.resolve.outputs.sha }}
-          INCLUDE: ${{ steps.pick.outputs.include }}
-          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
-            echo "FAIL sha" >&2
-            exit 1
-          fi
-          python3 - "$INCLUDE" <<'PY'
-          import json, os, subprocess, sys
-          include = json.loads(sys.argv[1])
-          sha = os.environ["SHA"]
-          url = os.environ["RUN_URL"]
-          for item in include:
-              ctx = "flutter-test (" + item["app"] + ")"
-              subprocess.check_call([
-                  "gh", "api", "--method", "POST",
-                  f"repos/zysicyj-xxc/zysicyj/statuses/{sha}",
-                  "-f", "state=pending",
-                  "-f", f"target_url={url}",
-                  "-f", "description=running",
-                  "-f", f"context={ctx}",
-              ], stdout=subprocess.DEVNULL)
-          print("PASS pending count=" + str(len(include)))
-          PY
-
   test:
     name: flutter-test (${{ matrix.app }})
     needs: meta
@@ -199,10 +169,15 @@ jobs:
     needs: [meta, test]
     if: always() && needs.meta.result == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     permissions:
       actions: read
+      contents: read
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
       - name: Post conclusions
         env:
           SHA: ${{ needs.meta.outputs.sha }}
@@ -218,31 +193,52 @@ jobs:
             exit 1
           fi
           python3 - <<'PY'
-          import json, os, subprocess, time
+          import json, os, subprocess, sys, time
           include = json.loads(os.environ["INCLUDE"])
           contexts = ["flutter-test (" + item["app"] + ")" for item in include]
           repo = os.environ["GITHUB_REPOSITORY"]
           run_id = os.environ["RUN_ID"]
           sha = os.environ["SHA"]
           url = os.environ["RUN_URL"]
+          script = ".github/scripts/api-retry.sh"
+
+          def run_api(env, args):
+              return subprocess.run(
+                  ["bash", script, *args],
+                  env=env,
+                  text=True,
+                  stdout=subprocess.PIPE,
+              )
+
           env = dict(os.environ)
           env["GH_TOKEN"] = os.environ["ACTIONS_TOKEN"]
           found = {}
+          limited = False
           for _ in range(6):
-              raw = subprocess.check_output([
-                  "gh", "api", "--paginate",
+              proc = run_api(env, [
+                  "call", "--paginate",
                   f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100",
-                  "--jq", ".jobs[] | [.name, (.conclusion // \"\")] | @tsv",
-              ], env=env, text=True)
+                  "--jq", '.jobs[] | [.name, (.conclusion // "")] | @tsv',
+              ])
+              if proc.returncode == 2:
+                  limited = True
+                  break
+              if proc.returncode != 0:
+                  sys.exit(proc.returncode)
               found = {}
-              for line in raw.splitlines():
+              for line in proc.stdout.splitlines():
                   name, _, conclusion = line.partition("\t")
-                  found[name] = conclusion
+                  if name:
+                      found[name] = conclusion
               if all(ctx in found for ctx in contexts):
                   break
               time.sleep(5)
           env["GH_TOKEN"] = os.environ["STATUS_TOKEN"]
-          for ctx in contexts:
+          if limited:
+              proc = run_api(env, ["post-limited", sha, url, *contexts])
+              sys.stdout.write(proc.stdout)
+              sys.exit(0 if proc.returncode == 0 else proc.returncode)
+          for index, ctx in enumerate(contexts):
               conclusion = found.get(ctx, "")
               if conclusion == "success":
                   state, desc = "success", "success"
@@ -251,14 +247,17 @@ jobs:
               else:
                   state, desc = "failure", "failure"
               print("status " + state)
-              subprocess.check_call([
-                  "gh", "api", "--method", "POST",
-                  f"repos/zysicyj-xxc/zysicyj/statuses/{sha}",
-                  "-f", f"state={state}",
-                  "-f", f"target_url={url}",
-                  "-f", f"description={desc}",
-                  "-f", f"context={ctx}",
-              ], env=env, stdout=subprocess.DEVNULL)
+              proc = run_api(env, ["status", sha, state, ctx, desc, url])
+              sys.stdout.write(proc.stdout)
+              if proc.returncode != 0:
+                  sys.exit(proc.returncode)
+              if "FAIL report rate-limited\n" in proc.stdout:
+                  rest = contexts[index + 1:]
+                  if rest:
+                      proc = run_api(env, ["post-limited", sha, url, *rest])
+                      sys.stdout.write(proc.stdout)
+                      sys.exit(0 if proc.returncode == 0 else proc.returncode)
+                  break
           PY
 
   purge-logs:

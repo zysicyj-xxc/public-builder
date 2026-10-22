@@ -1,0 +1,311 @@
+# Test-environment deploy for one private commit.
+# Trust boundary: workflow_dispatch inputs are untrusted. ref/sha pass
+# through resolve-private-ref before checkout. Checkout uses
+# PRIVATE_REPO_ACCESS_TOKEN and persist-credentials: false.
+# Upload is POST https://test-daymica.zysicyj.top/__staging-deploy.
+# Bearer and the origin address come from STAGING_WEBHOOK_DEPLOY_KEY and
+# STAGING_ORIGIN_IP. They are not curl arguments. See
+# .github/staging-webhook-deploy.md.
+# Not started by poll-private-gates. No production secrets. No nginx field.
+# Public logs are PASS/FAIL. Failure detail is encrypted when GATE_LOG_KEY
+# is set. This workflow is on the purge-gate-logs list.
+
+name: Staging Webhook Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref of zysicyj-xxc/zysicyj (default main)'
+        required: false
+        default: main
+        type: string
+      sha:
+        description: 'Commit SHA (optional; wins over ref)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staging-webhook-deploy
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  guard:
+    name: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      ref: ${{ steps.resolve.outputs.ref }}
+    steps:
+      - name: Checkout public-builder
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Reject production secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          file="$GITHUB_WORKSPACE/.github/workflows/staging-webhook-deploy.yml"
+          ks=$(printf '%s%s%s' 'ANDROID_' 'KEYSTORE_' 'BASE64')
+          sp=$(printf '%s%s' 'STORE_' 'PASSWORD')
+          fp=$(printf '%s%s%s' 'FP_' 'KEYSTORE_' 'B64')
+          if grep -n -- "$ks" "$file"; then
+            echo "FAIL production-signing" >&2
+            exit 1
+          fi
+          if grep -nE "(^|[^A-Z0-9])([A-Z0-9]+_)?${sp}" "$file"; then
+            echo "FAIL production-signing" >&2
+            exit 1
+          fi
+          if grep -nF -- "$fp" "$file"; then
+            echo "FAIL production-signing" >&2
+            exit 1
+          fi
+          rf=$(printf '%s%s_' 'RUST' 'FS')
+          if grep -nE -- "${rf}(ACCESS|SECRET)" "$file"; then
+            echo "FAIL object-store" >&2
+            exit 1
+          fi
+          prod=$(printf '%s%s' 'WEBHOOK_DEPLOY_' 'KEY')
+          staging=$(printf '%s%s' 'STAGING_' "$prod")
+          if grep -nF -- "$prod" "$file" | grep -vF -- "$staging"; then
+            echo "FAIL production-webhook" >&2
+            exit 1
+          fi
+          if grep -Fq 'staging-webhook-deploy.yml' "$GITHUB_WORKSPACE/.github/scripts/poll-gates.sh"; then
+            echo "FAIL poll-coupled" >&2
+            exit 1
+          fi
+          if ! grep -Fq 'staging-webhook-deploy.yml' "$GITHUB_WORKSPACE/.github/scripts/purge-gate-logs.sh"; then
+            echo "FAIL purge-list" >&2
+            exit 1
+          fi
+          python3 - "$file" <<'PY'
+          import re, sys
+          text = open(sys.argv[1], encoding="utf-8").read()
+          allowed = {
+              "PRIVATE_REPO_ACCESS_TOKEN",
+              "STAGING_WEBHOOK_DEPLOY_KEY",
+              "STAGING_ORIGIN_IP",
+              "GATE_LOG_KEY",
+          }
+          bad = []
+          for match in re.finditer(r"secrets\.([A-Z0-9_]+)", text):
+              name = match.group(1)
+              if name not in allowed:
+                  line = text.count("\n", 0, match.start()) + 1
+                  bad.append(f"{line}:{name}")
+          if bad:
+              print("FAIL secret-name", file=sys.stderr)
+              sys.exit(1)
+          if re.search(r"(?m)^\s*set\s+-[A-Za-z]*x\b|^\s*set\s+-o\s+xtrace\b", text):
+              print("FAIL xtrace", file=sys.stderr)
+              sys.exit(1)
+          print("PASS secret-names")
+          PY
+
+      - name: Self-check
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/staging_webhook_deploy.py --selftest
+          bash .github/scripts/assert-head-sha.sh --selftest
+
+      - name: Check deploy secrets
+        env:
+          STAGING_WEBHOOK_DEPLOY_KEY: ${{ secrets.STAGING_WEBHOOK_DEPLOY_KEY }}
+          STAGING_ORIGIN_IP: ${{ secrets.STAGING_ORIGIN_IP }}
+        shell: bash
+        run: |
+          set +x
+          set -euo pipefail
+          python3 .github/scripts/staging_webhook_deploy.py contract
+
+      - name: Allowlist ref/sha
+        id: resolve
+        uses: ./.github/actions/resolve-private-ref
+        with:
+          ref: ${{ github.event.inputs.ref || 'main' }}
+          sha: ${{ github.event.inputs.sha }}
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+
+  deploy:
+    name: deploy
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout public scripts
+        uses: actions/checkout@v4
+        with:
+          path: public-builder-scripts
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.guard.outputs.sha }}
+          path: repo
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check commit sha
+        working-directory: repo
+        env:
+          EXPECT_SHA: ${{ needs.guard.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash "$GITHUB_WORKSPACE/public-builder-scripts/.github/scripts/assert-head-sha.sh" "$EXPECT_SHA"
+
+      - name: Read Go version
+        id: go
+        working-directory: repo
+        shell: bash
+        run: |
+          set -euo pipefail
+          mod="backend/go.mod"
+          if [ ! -f "$mod" ]; then
+            echo "FAIL go-mod" >&2
+            exit 1
+          fi
+          ver=$(awk '/^go / { print $2; exit }' "$mod")
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+(\.[0-9]+)?$'; then
+            echo "FAIL go-version" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "PASS go-version"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ steps.go.outputs.version }}
+          cache: false
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: staging-webhook-${{ runner.os }}-${{ hashFiles('repo/**/go.sum') }}
+          restore-keys: |
+            staging-webhook-${{ runner.os }}-
+
+      - name: Read Flutter version
+        id: flutter
+        working-directory: repo
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f .flutter-version ]; then
+            echo "FAIL flutter-version" >&2
+            exit 1
+          fi
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "FAIL flutter-version" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "PASS flutter-version"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ steps.flutter.outputs.version }}
+          channel: stable
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build and upload
+        working-directory: repo
+        env:
+          EXPECT_SHA: ${{ needs.guard.outputs.sha }}
+          STAGING_GIT_REF: ${{ needs.guard.outputs.ref }}
+          STAGING_SHA_INPUT: ${{ github.event.inputs.sha }}
+          DETAIL_LOG: ${{ runner.temp }}/staging-webhook-detail.log
+          STAGING_WEBHOOK_DEPLOY_KEY: ${{ secrets.STAGING_WEBHOOK_DEPLOY_KEY }}
+          STAGING_ORIGIN_IP: ${{ secrets.STAGING_ORIGIN_IP }}
+        shell: bash
+        run: |
+          set +x
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/public-builder-scripts/.github/scripts/staging_webhook_deploy.py" deploy
+
+      - name: Encrypt detail log
+        if: failure()
+        env:
+          GATE_LOG_KEY: ${{ secrets.GATE_LOG_KEY }}
+          DETAIL_LOG: ${{ runner.temp }}/staging-webhook-detail.log
+        shell: bash
+        run: |
+          set +x
+          set -euo pipefail
+          if [ -z "${GATE_LOG_KEY:-}" ] || [ ! -s "${DETAIL_LOG}" ]; then
+            rm -f "${DETAIL_LOG}"
+            echo "SKIP encrypt"
+            exit 0
+          fi
+          mkdir -p "${RUNNER_TEMP}/gate-encrypted"
+          openssl enc -aes-256-cbc -pbkdf2 -iter 100000 -salt \
+            -pass env:GATE_LOG_KEY \
+            -in "${DETAIL_LOG}" \
+            -out "${RUNNER_TEMP}/gate-encrypted/staging-webhook.bin"
+          rm -f "${DETAIL_LOG}"
+          echo "PASS encrypt"
+
+      - name: Upload encrypted log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-log-${{ github.run_id }}-staging-webhook
+          path: ${{ runner.temp }}/gate-encrypted
+          retention-days: 1
+          if-no-files-found: ignore
+
+      - name: Delete staging bundle
+        if: always()
+        working-directory: repo
+        shell: bash
+        run: |
+          set +x
+          set -euo pipefail
+          find . -name 'staging-*.tar.gz' -type f -delete
+          rm -f "${RUNNER_TEMP}/staging-webhook-detail.log"
+          find "${RUNNER_TEMP}" -maxdepth 1 -type f -name 'staging-body-*' -delete
+          echo "PASS cleanup"
+
+  purge-logs:
+    name: schedule-log-purge
+    needs: [guard, deploy]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Request log purge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          DISPATCH_REF: ${{ github.ref_name }}
+        shell: bash
+        run: bash .github/scripts/request-purge.sh || echo "FAIL purge-request"

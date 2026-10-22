@@ -50,23 +50,6 @@ jobs:
           ref: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
           sha: ${{ github.event.client_payload.sha || github.event.inputs.sha }}
           token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-      - name: Set pending status
-        env:
-          SHA: ${{ steps.resolve.outputs.sha }}
-          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
-            echo "FAIL sha" >&2
-            exit 1
-          fi
-          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
-            -f state="pending" \
-            -f target_url="${RUN_URL}" \
-            -f description="running" \
-            -f context="ci-scripts" >/dev/null
-          echo "PASS pending"
 
   test:
     name: ci-scripts
@@ -146,8 +129,12 @@ jobs:
     needs: [meta, test]
     if: always() && needs.meta.result == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
       - name: Post conclusion
         env:
           SHA: ${{ needs.meta.outputs.sha }}
@@ -166,11 +153,7 @@ jobs:
             *) state=failure; desc=failure ;;
           esac
           echo "status ${state}"
-          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
-            -f state="$state" \
-            -f target_url="${RUN_URL}" \
-            -f description="$desc" \
-            -f context="ci-scripts" >/dev/null
+          bash .github/scripts/api-retry.sh status "$SHA" "$state" "ci-scripts" "$desc" "$RUN_URL"
 
   purge-logs:
     name: schedule-log-purge

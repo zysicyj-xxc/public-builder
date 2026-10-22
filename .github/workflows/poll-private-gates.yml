@@ -21,6 +21,16 @@ on:
         required: false
         default: ''
         type: string
+      sha:
+        description: 'One 40-hex head. Must be an open PR head or main. Empty polls every head.'
+        required: false
+        default: ''
+        type: string
+      force:
+        description: 'With sha, redispatch missing and error contexts for that head only.'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -56,6 +66,8 @@ jobs:
           DISPATCH_TOKEN: ${{ github.token }}
           DISPATCH_REF: ${{ github.ref_name }}
           ONLY: ${{ github.event.inputs.only }}
+          SHA_INPUT: ${{ github.event.inputs.sha }}
+          FORCE: ${{ github.event.inputs.force }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: bash .github/scripts/poll-gates.sh
 

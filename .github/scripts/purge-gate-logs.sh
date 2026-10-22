@@ -4,9 +4,11 @@
 # A 404 before the logs are readable is not success. Wait until GET
 # logs returns 200 or 302, DELETE, then GET until 404. Retries are
 # limited and back off. Giving up counts as failure.
-# RUN_ID empty: sweep completed runs. A 404 on that pass is not a
+# RUN_ID empty: sweep completed runs from the last 6 hours, one page of
+# 100. purge-gate-logs and the watchdog are limited to the last hour so
+# their own history cannot grow the sweep. A 404 on that pass is not a
 # confirmed delete and not a failure; the next pass retries once the
-# logs are readable.
+# logs are readable. 403 or 429 stops the sweep immediately.
 # DRY_RUN true: GET the actions runs API and count, without deleting.
 # Output is counts and FAIL lines. No URLs, tokens, or presigned URLs.
 set -euo pipefail
@@ -149,6 +151,9 @@ delete_logs() {
         ready=1
         break
         ;;
+      403|429)
+        return 2
+        ;;
     esac
     pause_after "$try"
   done
@@ -158,10 +163,16 @@ delete_logs() {
   fi
   for ((try = 1; try <= MAX_TRIES; try++)); do
     del=$(logs_code DELETE "$id")
+    case "$del" in
+      403|429) return 2 ;;
+    esac
     code=$(logs_code GET "$id")
     if [ -z "$code" ] || [ "$code" = "0" ]; then
       code=$del
     fi
+    case "$code" in
+      403|429) return 2 ;;
+    esac
     if [ "$code" = "404" ]; then
       deleted=$((deleted + 1))
       return 0
@@ -179,7 +190,10 @@ purge_one() {
   fi
   case "$mode" in
     strict)
-      delete_logs "$id"
+      if ! delete_logs "$id"; then
+        echo "FAIL purge rate-limited"
+        return 2
+      fi
       return 0
       ;;
     sweep) ;;
@@ -189,10 +203,179 @@ purge_one() {
       ;;
   esac
   code=$(logs_code GET "$id")
-  if [ "$code" = "404" ]; then
+  case "$code" in
+    404) return 0 ;;
+    403|429)
+      echo "FAIL purge rate-limited"
+      return 2
+      ;;
+  esac
+  if ! delete_logs "$id"; then
+    echo "FAIL purge rate-limited"
+    return 2
+  fi
+}
+
+gh_http_code() {
+  local file="$1" code
+  code=$(grep -Eo '\(HTTP [0-9]{3}\)' "$file" 2>/dev/null | head -n 1 | grep -Eo '[0-9]{3}' || true)
+  printf '%s' "${code:-0}"
+}
+
+core_remaining() {
+  local raw
+  if [ -n "${PURGE_RATE_REMAINING:-}" ]; then
+    printf '%s' "$PURGE_RATE_REMAINING"
     return 0
   fi
-  delete_logs "$id"
+  if ! raw=$(gh api rate_limit --jq '.resources.core.remaining' 2>/dev/null); then
+    printf ''
+    return 0
+  fi
+  case "$raw" in
+    ''|*[!0-9]*) printf '' ;;
+    *) printf '%s' "$raw" ;;
+  esac
+}
+
+list_completed_ids() {
+  local wf="$1" hours="$2" since line code ids err parts
+  if [ -n "${PURGE_LIST_QUEUE:-}" ]; then
+    if [ ! -s "$PURGE_LIST_QUEUE" ]; then
+      return 0
+    fi
+    line=$(head -n 1 "$PURGE_LIST_QUEUE")
+    tail -n +2 "$PURGE_LIST_QUEUE" >"${PURGE_LIST_QUEUE}.next"
+    mv "${PURGE_LIST_QUEUE}.next" "$PURGE_LIST_QUEUE"
+    read -r -a parts <<<"$line"
+    code="${parts[0]:-}"
+    case "$code" in
+      403|429) return 2 ;;
+      200)
+        if [ "${#parts[@]}" -gt 1 ]; then
+          printf '%s\n' "${parts[@]:1}"
+        fi
+        return 0
+        ;;
+      *) return 1 ;;
+    esac
+  fi
+  since=$(date -u -d "${hours} hours ago" +%Y-%m-%dT%H:%M:%SZ)
+  err=$(mktemp)
+  if ids=$(gh api --method GET \
+    "repos/${repo}/actions/workflows/${wf}/runs" \
+    -f status=completed \
+    -f per_page=100 \
+    -f "created=>=${since}" \
+    --jq '.workflow_runs[].id' 2>"$err"); then
+    rm -f "$err"
+    if [ -n "$ids" ]; then
+      printf '%s\n' "$ids"
+    fi
+    return 0
+  fi
+  code=$(gh_http_code "$err")
+  rm -f "$err"
+  if [ "$code" = "403" ] || [ "$code" = "429" ]; then
+    return 2
+  fi
+  note_fail "${code:-0}"
+  return 1
+}
+
+sweep_one() {
+  local id="$1" code
+  if [ "$dry" -eq 1 ]; then
+    would=$((would + 1))
+    return 0
+  fi
+  code=$(logs_code GET "$id")
+  case "$code" in
+    404) return 0 ;;
+    403|429)
+      echo "FAIL purge rate-limited"
+      return 2
+      ;;
+  esac
+  if ! delete_logs "$id"; then
+    echo "FAIL purge rate-limited"
+    return 2
+  fi
+}
+
+sweep_all() {
+  local wf hours ids id remaining rc
+  remaining=$(core_remaining)
+  if [ -n "$remaining" ] && [ "$remaining" -lt 500 ]; then
+    echo "FAIL purge rate-limited"
+    return 0
+  fi
+  for wf in "${gates[@]}"; do
+    case "$wf" in
+      purge-gate-logs.yml|poll-gates-watchdog.yml) hours=1 ;;
+      *) hours=6 ;;
+    esac
+    ids=""
+    if ids=$(list_completed_ids "$wf" "$hours"); then
+      rc=0
+    else
+      rc=$?
+    fi
+    if [ "$rc" -eq 2 ]; then
+      echo "FAIL purge rate-limited"
+      return 0
+    fi
+    if [ "$rc" -ne 0 ]; then
+      break
+    fi
+    while IFS= read -r id; do
+      if ! printf '%s' "$id" | grep -Eq '^[0-9]+$'; then
+        continue
+      fi
+      if ! sweep_one "$id"; then
+        return 0
+      fi
+    done <<<"$ids"
+  done
+}
+
+wait_until_completed() {
+  local id="$1" i status err code line
+  for ((i = 1; i <= 10; i++)); do
+    status=""
+    if [ -n "${PURGE_STATUS_QUEUE:-}" ]; then
+      if [ -s "$PURGE_STATUS_QUEUE" ]; then
+        line=$(head -n 1 "$PURGE_STATUS_QUEUE")
+        tail -n +2 "$PURGE_STATUS_QUEUE" >"${PURGE_STATUS_QUEUE}.next"
+        mv "${PURGE_STATUS_QUEUE}.next" "$PURGE_STATUS_QUEUE"
+        status=$line
+      fi
+      if [ "$status" = "403" ] || [ "$status" = "429" ]; then
+        echo "FAIL purge rate-limited"
+        return 2
+      fi
+    else
+      err=$(mktemp)
+      if status=$(gh api "repos/${repo}/actions/runs/${id}" --jq .status 2>"$err"); then
+        rm -f "$err"
+      else
+        code=$(gh_http_code "$err")
+        rm -f "$err"
+        status=""
+        if [ "$code" = "403" ] || [ "$code" = "429" ]; then
+          echo "FAIL purge rate-limited"
+          return 2
+        fi
+      fi
+    fi
+    if [ "$status" = "completed" ]; then
+      return 0
+    fi
+    if [ "$i" -lt 10 ] && [ "${PURGE_NO_SLEEP:-}" != "1" ]; then
+      sleep 30
+    fi
+  done
+  return 1
 }
 
 finish() {
@@ -351,7 +534,10 @@ PY
   export PURGE_CODE_QUEUE PURGE_CODE_LOG
 
   capture() {
+    set +e
     "$@" >"$outf" 2>"$errf"
+    CAP_RC=$?
+    set -e
     stdout=$(cat "$outf")
   }
 
@@ -472,6 +658,118 @@ PY
     exit 1
   fi
 
+  # A 403 while confirming a delete does not retry ten times.
+  setup_case 200 403
+  capture delete_logs 42
+  assert_calls
+  if [ "$CAP_RC" -ne 2 ] || [ "$(count_method GET)" -ne 1 ] \
+    || [ "$(count_method DELETE)" -ne 1 ] || [ "$PAUSE_COUNT" -ne 0 ] \
+    || [ -n "$stdout" ]; then
+    echo "FAIL selftest-rate-delete"
+    exit 1
+  fi
+
+  # Sweep stops on the first 403 and does not read the next workflow.
+  listq=$(mktemp)
+  printf '%s\n' '403' '200 11' >"$listq"
+  PURGE_LIST_QUEUE=$listq
+  PURGE_RATE_REMAINING=5000
+  export PURGE_LIST_QUEUE PURGE_RATE_REMAINING
+  setup_case
+  capture sweep_all
+  if [ "$stdout" != "FAIL purge rate-limited" ] || [ "$(count_method GET)" -ne 0 ] \
+    || [ "$(count_method DELETE)" -ne 0 ] || ! grep -Fxq '200 11' "$listq"; then
+    echo "FAIL selftest-sweep-rate"
+    exit 1
+  fi
+  check_quiet sweep-rate "$outf" "$errf"
+
+  # A readable run is inspected, then a 403 on the log GET stops the sweep.
+  printf '%s\n' '200 11' >"$listq"
+  setup_case 403
+  capture sweep_all
+  if [ "$stdout" != "FAIL purge rate-limited" ] || [ "$(count_method GET)" -ne 1 ] \
+    || [ "$(count_method DELETE)" -ne 0 ]; then
+    echo "FAIL selftest-sweep-log-rate"
+    exit 1
+  fi
+
+  # Remaining under 500 skips the sweep before any list call.
+  printf '%s\n' '200 11' >"$listq"
+  PURGE_RATE_REMAINING=499
+  setup_case 200
+  capture sweep_all
+  if [ "$stdout" != "FAIL purge rate-limited" ] || [ "$(count_method GET)" -ne 0 ] \
+    || ! grep -Fxq '200 11' "$listq"; then
+    echo "FAIL selftest-sweep-budget"
+    exit 1
+  fi
+  unset PURGE_LIST_QUEUE
+  unset PURGE_RATE_REMAINING
+
+  # The list request is one page of recent runs, not a full pagination.
+  ghlog=$(mktemp)
+  ghdir=$(mktemp -d)
+  cat >"$ghdir/gh" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >>"$PURGE_GH_LOG"
+if [[ "$*" == *--paginate* ]]; then
+  echo "paginated" >&2
+  exit 1
+fi
+printf '%s\n' 11
+exit 0
+EOF
+  chmod +x "$ghdir/gh"
+  PURGE_GH_LOG=$ghlog
+  export PURGE_GH_LOG
+  PATH="$ghdir:$PATH"
+  : >"$ghlog"
+  list_completed_ids flutter-test.yml 6 >/dev/null
+  list_completed_ids purge-gate-logs.yml 1 >/dev/null
+  list_completed_ids poll-gates-watchdog.yml 1 >/dev/null
+  if [ "$(wc -l <"$ghlog")" -ne 3 ] \
+    || grep -q -- '--paginate' "$ghlog" \
+    || ! grep -q 'per_page=100' "$ghlog" \
+    || ! grep -q 'created=>=' "$ghlog" \
+    || ! grep -q 'flutter-test.yml' "$ghlog" \
+    || ! grep -q 'purge-gate-logs.yml' "$ghlog"; then
+    echo "FAIL selftest-sweep-recent"
+    exit 1
+  fi
+  six=$(sed -n '1s/.*created=>=//p' "$ghlog")
+  one=$(sed -n '2s/.*created=>=//p' "$ghlog")
+  if [ -z "$six" ] || [ -z "$one" ] || [[ "$one" < "$six" ]]; then
+    echo "FAIL selftest-sweep-recent"
+    exit 1
+  fi
+  PATH="${PATH#"$ghdir:"}"
+  rm -rf "$ghdir"
+  unset PURGE_GH_LOG
+
+  # Waiting for one run stops on 403 instead of polling ten times.
+  statq=$(mktemp)
+  printf '%s\n' 403 completed >"$statq"
+  PURGE_STATUS_QUEUE=$statq
+  export PURGE_STATUS_QUEUE
+  capture wait_until_completed 9
+  if [ "$CAP_RC" -ne 2 ] || [ "$stdout" != "FAIL purge rate-limited" ] \
+    || ! grep -Fxq completed "$statq"; then
+    echo "FAIL selftest-wait-rate"
+    exit 1
+  fi
+  : >"$statq"
+  for ((i = 1; i <= 10; i++)); do
+    echo in_progress >>"$statq"
+  done
+  capture wait_until_completed 9
+  if [ "$CAP_RC" -ne 1 ] || [ -n "$stdout" ] || [ -s "$statq" ]; then
+    echo "FAIL selftest-wait-budget"
+    exit 1
+  fi
+  unset PURGE_STATUS_QUEUE
+  rm -f "$listq" "$ghlog" "$statq"
+
   echo "PASS selftest"
   cleanup_selftest
   trap - EXIT
@@ -512,45 +810,27 @@ if [ -n "${RUN_ID:-}" ]; then
     finish
     exit 0
   fi
-  status=""
-  for _ in $(seq 1 30); do
-    status=$(gh api "repos/${repo}/actions/runs/${RUN_ID}" --jq .status 2>/dev/null || true)
-    if [ "$status" = "completed" ]; then
-      break
-    fi
-    sleep 10
-  done
-  if [ "$status" != "completed" ]; then
+  rc=0
+  if wait_until_completed "$RUN_ID"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  if [ "$rc" -eq 2 ]; then
+    exit 0
+  fi
+  if [ "$rc" -ne 0 ]; then
     echo "SKIP purge still-running"
     exit 0
   fi
-  purge_one "$RUN_ID" strict
+  if ! purge_one "$RUN_ID" strict; then
+    exit 0
+  fi
   if finish; then
     exit 0
   fi
   exit 1
 fi
 
-for wf in "${gates[@]}"; do
-  err=$(mktemp)
-  set +e
-  ids=$(gh api --paginate \
-    "repos/${repo}/actions/workflows/${wf}/runs?status=completed&per_page=30" \
-    --jq '.workflow_runs[].id' 2>"$err")
-  rc=$?
-  set -e
-  if [ "$rc" -ne 0 ]; then
-    code=$(sed -n 's/.*HTTP \([0-9][0-9][0-9]\).*/\1/p' "$err" | head -1)
-    rm -f "$err"
-    note_fail "${code:-0}"
-    break
-  fi
-  rm -f "$err"
-  while IFS= read -r id; do
-    if printf '%s' "$id" | grep -Eq '^[0-9]+$'; then
-      purge_one "$id" sweep
-    fi
-  done <<< "$ids"
-done
-
+sweep_all
 finish

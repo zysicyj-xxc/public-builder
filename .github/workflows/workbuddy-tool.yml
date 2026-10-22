@@ -46,7 +46,7 @@ jobs:
   meta:
     name: resolve-payload
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
       ref: ${{ steps.resolve.outputs.ref }}
@@ -98,11 +98,7 @@ jobs:
             *) echo "ERROR: do_docker_push failed allowlist" >&2; exit 1 ;;
           esac
           post() {
-            gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
-              -f state="pending" \
-              -f target_url="${RUN_URL}" \
-              -f description="running on public-builder" \
-              -f context="$1" >/dev/null
+            bash .github/scripts/api-retry.sh status "$SHA" pending "$1" "running on public-builder" "$RUN_URL"
           }
           post "build-check"
           if [ "$DO_PUSH" = "true" ]; then
@@ -134,11 +130,7 @@ jobs:
             raw_push="${FROM_PAYLOAD:-}"
           fi
           post() {
-            gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${sha}" \
-              -f state="failure" \
-              -f target_url="${RUN_URL}" \
-              -f description="payload rejected" \
-              -f context="$1" >/dev/null
+            bash .github/scripts/api-retry.sh status "$sha" failure "$1" "payload rejected" "$RUN_URL"
           }
           post "build-check"
           case "$raw_push" in
@@ -230,8 +222,12 @@ jobs:
     needs: [meta, build-check, push-dockerhub]
     if: always() && needs.meta.result == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
       - name: Post conclusions
         env:
           SHA: ${{ needs.meta.outputs.sha }}
@@ -258,11 +254,7 @@ jobs:
               *) state=failure; desc=failure ;;
             esac
             echo "status ${ctx} ${state}"
-            gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
-              -f state="$state" \
-              -f target_url="${RUN_URL}" \
-              -f description="$desc" \
-              -f context="$ctx" >/dev/null
+            bash .github/scripts/api-retry.sh status "$SHA" "$state" "$ctx" "$desc" "$RUN_URL"
           }
           post build-check "$BUILD"
           if [ "$DO_PUSH" = "true" ]; then

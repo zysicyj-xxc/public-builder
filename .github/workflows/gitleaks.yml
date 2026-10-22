@@ -1,0 +1,224 @@
+# Secret scan for zysicyj-xxc/zysicyj on free public Actions minutes.
+# gitleaks 8.30.1 scans added lines in one range, not full history.
+# Open PR head: that PR's base.sha..head.sha. Otherwise first parent..head.
+# No parent: -1 head. Checkout is fetch-depth 0.
+# Command: gitleaks git --config .gitleaks.toml --log-opts --redact --no-banner .
+# Trust boundary: repository_dispatch and workflow_dispatch inputs are untrusted.
+# Allowlist ref/sha before any API call. Status posts use
+# PRIVATE_REPO_ACCESS_TOKEN on jobs that do not run gitleaks.
+# Public logs are PASS/FAIL counts. Findings stay in the encrypted artifact.
+# Commit-status context: gitleaks. This is a status, not the old check run.
+
+name: Gitleaks
+
+on:
+  repository_dispatch:
+    types: [gitleaks]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref or SHA of zysicyj-xxc/zysicyj'
+        required: true
+        type: string
+      sha:
+        description: 'Commit SHA for checkout and status (default: resolve ref)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gitleaks-${{ github.event.client_payload.sha || github.event.inputs.sha || github.event.client_payload.ref || github.event.inputs.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  meta:
+    name: resolve-payload
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      base: ${{ steps.range.outputs.base }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Self-check
+        run: |
+          bash .github/scripts/gitleaks-range.sh --selftest
+          bash .github/scripts/gitleaks-gate.sh --selftest
+
+      - name: Allowlist ref/sha
+        id: resolve
+        uses: ./.github/actions/resolve-private-ref
+        with:
+          ref: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
+          sha: ${{ github.event.client_payload.sha || github.event.inputs.sha }}
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+
+      - name: Resolve PR base
+        id: range
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+        run: bash .github/scripts/gitleaks-range.sh
+
+      - name: Set pending status
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "FAIL sha" >&2
+            exit 1
+          fi
+          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
+            -f state="pending" \
+            -f target_url="${RUN_URL}" \
+            -f description="running on public-builder" \
+            -f context="gitleaks" >/dev/null
+          echo "PASS pending"
+
+      - name: Post failure when resolve fails
+        if: failure()
+        env:
+          RESOLVED_SHA: ${{ steps.resolve.outputs.sha }}
+          RAW_SHA: ${{ github.event.client_payload.sha || github.event.inputs.sha }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          sha=$(printf '%s' "${RESOLVED_SHA:-}" | tr 'A-F' 'a-f' | tr -d '[:space:]')
+          if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
+            sha=$(printf '%s' "${RAW_SHA:-}" | tr 'A-F' 'a-f' | tr -d '[:space:]')
+          fi
+          if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "FAIL status nosha"
+            exit 0
+          fi
+          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${sha}" \
+            -f state="failure" \
+            -f target_url="${RUN_URL}" \
+            -f description="payload rejected" \
+            -f context="gitleaks" >/dev/null
+          echo "FAIL status failure"
+
+  scan:
+    name: gitleaks
+    needs: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ needs.meta.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          path: _pb
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Install gitleaks 8.30.1
+        run: |
+          set -euo pipefail
+          ver=8.30.1
+          sum=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+          archive="$tmp/gitleaks.tar.gz"
+          curl -fsSL -o "$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${ver}/gitleaks_${ver}_linux_x64.tar.gz"
+          if ! echo "${sum}  ${archive}" | sha256sum -c - >/dev/null 2>&1; then
+            echo "FAIL gitleaks-install"
+            exit 1
+          fi
+          tar -xzf "$archive" -C "$tmp" gitleaks
+          mkdir -p "$HOME/.local/bin"
+          install -m 0755 "$tmp/gitleaks" "$HOME/.local/bin/gitleaks"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "PASS gitleaks-install"
+      - name: Scan
+        env:
+          BASE: ${{ needs.meta.outputs.base }}
+          HEAD_SHA: ${{ needs.meta.outputs.sha }}
+          GATE_LOG_KEY: ${{ secrets.GATE_LOG_KEY }}
+          QUIET_LABEL: gitleaks
+          QUIET_KIND: generic
+          QUIET_CMD: bash "$GITHUB_WORKSPACE/_pb/.github/scripts/gitleaks-gate.sh"
+        run: bash "$GITHUB_WORKSPACE/_pb/.github/scripts/quiet.sh"
+      - name: Upload encrypted log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-log-${{ github.run_id }}-gitleaks
+          path: ${{ runner.temp }}/gate-encrypted
+          retention-days: 1
+          if-no-files-found: ignore
+
+  report:
+    name: post-status
+    needs: [meta, scan]
+    if: always() && needs.meta.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Post conclusion
+        env:
+          SHA: ${{ needs.meta.outputs.sha }}
+          RESULT: ${{ needs.scan.result }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "FAIL sha" >&2
+            exit 1
+          fi
+          case "$RESULT" in
+            success) state=success; desc=success ;;
+            cancelled) state=failure; desc=cancelled ;;
+            *) state=failure; desc=failure ;;
+          esac
+          gh api --method POST "repos/zysicyj-xxc/zysicyj/statuses/${SHA}" \
+            -f state="$state" \
+            -f target_url="${RUN_URL}" \
+            -f description="$desc" \
+            -f context="gitleaks" >/dev/null
+          if [ "$state" = success ]; then
+            echo "PASS status success"
+          else
+            echo "FAIL status ${state}"
+          fi
+
+  purge-logs:
+    name: schedule-log-purge
+    needs: [meta, report]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Request log purge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          DISPATCH_REF: ${{ github.ref_name }}
+        run: bash .github/scripts/request-purge.sh || echo "FAIL purge-request"

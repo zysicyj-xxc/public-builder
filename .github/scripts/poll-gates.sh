@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # List open PR head SHAs. Also consider the private repo default-branch
 # head once: if that commit has no public-builder commit status, dispatch
-# the same gates as a PR head. Pending counts as present. gitleaks and
-# release contexts do not. Does not print branch names, titles, or paths.
+# the same gates as a PR head. Pending counts as present. Release
+# contexts do not. The gitleaks commit status does. A check-run name
+# such as "gitleaks / scan" is not a commit status. Does not print
+# branch names, titles, or paths.
 set -euo pipefail
 
 PRIVATE_REPO="zysicyj-xxc/zysicyj"
@@ -15,14 +17,18 @@ want() {
   [ -z "$only" ] || [ "$only" = "$1" ]
 }
 
-# Contexts this poll writes back. gitleaks, build-check, and push-dockerhub
-# are not quality-gate statuses and must not suppress a head run.
+# Contexts this poll writes back. build-check and push-dockerhub are not
+# quality-gate statuses and must not suppress a head run. gitleaks and
+# validate-admin-web are commit statuses from public-builder. Check-run
+# display names are not matched here; this function only sees statuses.
 is_builder_context() {
   local ctx="$1"
   case "$ctx" in
     quality/backend|quality/website|quality/flutter-analyze)
       return 0 ;;
     ci-scripts|tokens|web-shared|website|export-diff)
+      return 0 ;;
+    gitleaks|validate-admin-web)
       return 0 ;;
     "assert domain registry"|"layout + domain gates")
       return 0 ;;
@@ -314,6 +320,26 @@ poll_one() {
     fi
   fi
 
+  if want gitleaks; then
+    if missing "$states" "gitleaks"; then
+      post_pending "$sha" "gitleaks"
+      dispatch gitleaks.yml "${body_ref}}}"
+      if [ "$DISPATCH_OK" -ne 0 ]; then
+        mark_dispatch_failed "$sha" "gitleaks"
+      fi
+    fi
+  fi
+
+  if want admin-web; then
+    if missing "$states" "validate-admin-web"; then
+      post_pending "$sha" "validate-admin-web"
+      dispatch admin-web-gate.yml "${body_ref}}}"
+      if [ "$DISPATCH_OK" -ne 0 ]; then
+        mark_dispatch_failed "$sha" "validate-admin-web"
+      fi
+    fi
+  fi
+
   if want scripts; then
     local tree="$tmpdir/${sha}.tree" ctxfile="$tmpdir/${sha}.ctx"
     if GH_TOKEN="$GH_TOKEN" gh api "repos/${PRIVATE_REPO}/git/trees/${sha}?recursive=1" >"$tree" \
@@ -362,7 +388,7 @@ run_poll() {
 
   only="${ONLY:-}"
   case "$only" in
-    ""|quality|flutter|daymica|ci-scripts|i18n|visual|domain|scripts|web|utools) ;;
+    ""|quality|flutter|daymica|ci-scripts|i18n|visual|domain|scripts|web|utools|gitleaks|admin-web) ;;
     *) echo "FAIL poll only"; exit 1 ;;
   esac
 
@@ -450,7 +476,9 @@ selftest() {
   if ! grep -Fq 'quality-analyze.yml' "$script_dir/purge-gate-logs.sh" \
     || ! grep -Fq 'flutter-test.yml' "$script_dir/purge-gate-logs.sh" \
     || ! grep -Fq 'scripts-gate.yml' "$script_dir/purge-gate-logs.sh" \
-    || ! grep -Fq 'utools-visual.yml' "$script_dir/purge-gate-logs.sh"; then
+    || ! grep -Fq 'utools-visual.yml' "$script_dir/purge-gate-logs.sh" \
+    || ! grep -Fq 'gitleaks.yml' "$script_dir/purge-gate-logs.sh" \
+    || ! grep -Fq 'admin-web-gate.yml' "$script_dir/purge-gate-logs.sh"; then
     echo "FAIL selftest-purge"
     exit 1
   fi
@@ -484,7 +512,8 @@ selftest() {
   expect_yes exp "export-diff"
   expect_yes scr "scripts/layout.tests.ps1"
   expect_yes nest "scripts/nested/name.tests.ps1"
-  expect_no gl "gitleaks"
+  expect_yes gl "gitleaks"
+  expect_yes aw "validate-admin-web"
   expect_no gl2 "Gitleaks"
   expect_no gl3 "gitleaks / scan"
   expect_no bc "build-check"
@@ -622,7 +651,7 @@ EOF
     awk -F '\t' -v s="$sha" '$1=="status" && $2==s { n++ } END { print n+0 }' "$FAKE_LOG"
   }
 
-  gates='quality-analyze.yml flutter-test.yml daymica-test.yml ci-scripts.yml i18n-gate.yml visual-lint.yml domain-gate.yml web-visual.yml utools-visual.yml scripts-gate.yml'
+  gates='quality-analyze.yml flutter-test.yml daymica-test.yml ci-scripts.yml i18n-gate.yml visual-lint.yml domain-gate.yml web-visual.yml utools-visual.yml gitleaks.yml admin-web-gate.yml scripts-gate.yml'
 
   # Missing builder status: run the full gate set once.
   prepare
@@ -647,7 +676,7 @@ EOF
     echo "FAIL selftest-missing-run"
     exit 1
   fi
-  if awk -F '\t' '$1=="dispatch" && $2 !~ /^(quality-analyze|flutter-test|daymica-test|ci-scripts|i18n-gate|visual-lint|domain-gate|web-visual|utools-visual|scripts-gate)\.yml$/ { bad=1 } END { exit bad+0 }' "$FAKE_LOG"; then
+  if awk -F '\t' '$1=="dispatch" && $2 !~ /^(quality-analyze|flutter-test|daymica-test|ci-scripts|i18n-gate|visual-lint|domain-gate|web-visual|utools-visual|gitleaks|admin-web-gate|scripts-gate)\.yml$/ { bad=1 } END { exit bad+0 }' "$FAKE_LOG"; then
     :
   else
     echo "FAIL selftest-missing-run"
@@ -705,16 +734,30 @@ EOF
     exit 1
   fi
 
-  # gitleaks alone does not count.
+  # The gitleaks commit status counts, so it skips the whole head.
   prepare
   printf '%s\t%s\t%s\n' "$HEAD" 'gitleaks' 'success' >"$FAKE_STATUSES"
   printf '%s\t%s\t%s\n' "$HEAD" 'Gitleaks' 'pending' >>"$FAKE_STATUSES"
   export FAKE_MAIN_SHA="$HEAD" FAKE_PR_SHAS='' ONLY='' PR_USED=''
   execute
-  check_quiet gitleaks-run
+  check_quiet gitleaks-skip
+  if [ "$TEST_RC" -ne 0 ] || ! grep -Fxq 'PASS poll skip=1' "$TEST_OUT" \
+    || [ "$(awk -F '\t' '$1=="dispatch" { n++ } END { print n+0 }' "$FAKE_LOG")" != 0 ]; then
+    echo "FAIL selftest-gitleaks-skip"
+    exit 1
+  fi
+
+  # Check-run style names are not the commit status and do not skip.
+  prepare
+  printf '%s\t%s\t%s\n' "$HEAD" 'gitleaks / scan' 'success' >"$FAKE_STATUSES"
+  printf '%s\t%s\t%s\n' "$HEAD" 'Gitleaks' 'pending' >>"$FAKE_STATUSES"
+  export FAKE_MAIN_SHA="$HEAD" FAKE_PR_SHAS='' ONLY='' PR_USED=''
+  execute
+  check_quiet gitleaks-checkrun
   if [ "$TEST_RC" -ne 0 ] || ! grep -Fxq 'PASS poll skip=0' "$TEST_OUT" \
+    || [ "$(dispatch_count gitleaks.yml "$HEAD")" != 1 ] \
     || [ "$(dispatch_count quality-analyze.yml "$HEAD")" != 1 ]; then
-    echo "FAIL selftest-gitleaks-run"
+    echo "FAIL selftest-gitleaks-checkrun"
     exit 1
   fi
 
@@ -772,8 +815,32 @@ EOF
   check_quiet only
   if [ "$TEST_RC" -ne 0 ] || ! grep -Fxq 'PASS poll skip=0' "$TEST_OUT" \
     || [ "$(dispatch_count quality-analyze.yml "$HEAD")" != 1 ] \
-    || [ "$(dispatch_count flutter-test.yml "$HEAD")" != 0 ]; then
+    || [ "$(dispatch_count flutter-test.yml "$HEAD")" != 0 ] \
+    || [ "$(dispatch_count gitleaks.yml "$HEAD")" != 0 ]; then
     echo "FAIL selftest-only"
+    exit 1
+  fi
+
+  prepare
+  export FAKE_MAIN_SHA="$HEAD" FAKE_PR_SHAS='' ONLY='gitleaks' PR_USED=''
+  execute
+  check_quiet only-gitleaks
+  if [ "$TEST_RC" -ne 0 ] || ! grep -Fxq 'PASS poll skip=0' "$TEST_OUT" \
+    || [ "$(dispatch_count gitleaks.yml "$HEAD")" != 1 ] \
+    || [ "$(dispatch_count admin-web-gate.yml "$HEAD")" != 0 ] \
+    || [ "$(dispatch_count quality-analyze.yml "$HEAD")" != 0 ]; then
+    echo "FAIL selftest-only-gitleaks"
+    exit 1
+  fi
+
+  prepare
+  export FAKE_MAIN_SHA="$HEAD" FAKE_PR_SHAS='' ONLY='admin-web' PR_USED=''
+  execute
+  check_quiet only-admin
+  if [ "$TEST_RC" -ne 0 ] || ! grep -Fxq 'PASS poll skip=0' "$TEST_OUT" \
+    || [ "$(dispatch_count admin-web-gate.yml "$HEAD")" != 1 ] \
+    || [ "$(dispatch_count gitleaks.yml "$HEAD")" != 0 ]; then
+    echo "FAIL selftest-only-admin"
     exit 1
   fi
 

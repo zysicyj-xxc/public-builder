@@ -28,6 +28,8 @@ gates=(
   scripts-gate.yml
   web-visual.yml
   utools-visual.yml
+  gitleaks.yml
+  admin-web-gate.yml
   staging-webhook-deploy.yml
   purge-gate-logs.yml
 )

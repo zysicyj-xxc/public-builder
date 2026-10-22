@@ -1,7 +1,8 @@
 # Poll zysicyj-xxc/zysicyj for open PR heads and the default-branch head.
 # The head uses the same gates as a PR head, once per SHA: any existing
-# public-builder status skips it, including pending. A gitleaks status
-# does not count, and neither do release contexts such as build-check.
+# public-builder status skips it, including pending. Release contexts
+# such as build-check do not count. The gitleaks commit status does.
+# A private-repo gitleaks check run is not read and does not count.
 # Trust boundary: schedule and workflow_dispatch only. No pull_request.
 # PRIVATE_REPO_ACCESS_TOKEN reads the private repo and writes statuses.
 # The poll job and the purge job declare actions: write themselves.
@@ -16,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       only:
-        description: 'One gate id, or empty for every missing gate. quality, flutter, daymica, ci-scripts, i18n, visual, domain, scripts, web, utools.'
+        description: 'One gate id, or empty for every missing gate. quality, flutter, daymica, ci-scripts, i18n, visual, domain, scripts, web, utools, gitleaks, admin-web.'
         required: false
         default: ''
         type: string

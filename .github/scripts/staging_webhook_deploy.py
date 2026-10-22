@@ -62,7 +62,8 @@ SOURCE_LINE = re.compile(
 )
 ANY_SOURCE = re.compile(r"(?m)^(?:source|\.)\s+\S+")
 SHELL_NAME = re.compile(r"^scripts/ci/[A-Za-z0-9._-]+\.sh$")
-XTRACE_OUT = re.compile(r"^\s*\+")
+# `flutter pub get` prints "+ pkg ver". Only lines tagged by child_env PS4 are xtrace.
+XTRACE_OUT = re.compile(r"^\s*\+*__PB_XTRACE__ ")
 TOKEN_LEAK = re.compile(r"\b(?:ghp_|gho_|ghu_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]+")
 SET_X_CMD = re.compile(r"(?m)^\s*set\s+-[A-Za-z]*x\b|^\s*set\s+-o\s+xtrace\b")
 
@@ -435,6 +436,7 @@ def child_env(sha):
         env["CNB_BRANCH"] = branch
     for banned in (KEY_NAME, IP_NAME, "GITHUB_TOKEN", "PRIVATE_REPO_ACCESS_TOKEN", "GATE_LOG_KEY"):
         env.pop(banned, None)
+    env["PS4"] = "+__PB_XTRACE__ "
     return env
 
 
@@ -748,10 +750,21 @@ def selftest():
     assert guard_text("git clone https://example.com/secrets.git\n") == "rejected-source-dump"
     sample_ip = ".".join(["203", "0", "113", "10"])
     cleaned, xtrace = redact(
-        f"+ curl secret\nAuthorization: Bearer deploy-key-value-0123\ndial {sample_ip}\nok\n",
+        "\n".join(
+            [
+                "+__PB_XTRACE__ curl secret",
+                "+ async 2.11.0",
+                "Authorization: Bearer deploy-key-value-0123",
+                f"dial {sample_ip}",
+                "ok",
+            ]
+        )
+        + "\n",
         ["deploy-key-value-0123"],
     )
     assert xtrace == 1
+    assert "+__PB_XTRACE__" not in cleaned
+    assert "+ async 2.11.0" in cleaned
     assert "deploy-key-value-0123" not in cleaned
     assert sample_ip not in cleaned
     assert "ok" in cleaned
@@ -884,6 +897,7 @@ def selftest():
     assert sample_ip not in env.values()
     assert env["CNB_BRANCH"] == "main"
     assert env["CNB_COMMIT"] == sha
+    assert env["PS4"] == "+__PB_XTRACE__ "
     os.environ["STAGING_SHA_INPUT"] = sha
     os.environ["STAGING_GIT_REF"] = "refs/heads/main"
     os.environ["GITHUB_RUN_ID"] = "42"
@@ -899,6 +913,13 @@ def selftest():
         _tree_cases(tmp)
         _post_cases(tmp, sha, sample_ip)
         _deploy_case(tmp, sample_ip)
+        xtrace_dir = tmp / "xtrace-run"
+        xtrace_dir.mkdir()
+        _deploy_case(
+            xtrace_dir,
+            sample_ip,
+            xtrace_hook="trace_opt=-x\nbash \"$trace_opt\" -c true\n",
+        )
     finally:
         import shutil
 
@@ -1160,7 +1181,7 @@ def _post_cases(tmp: Path, sha, ip):
         fail("selftest-leak")
 
 
-def _deploy_case(tmp: Path, ip):
+def _deploy_case(tmp: Path, ip, xtrace_hook=""):
     repo = tmp / "repo"
     repo.mkdir()
     script_dir = repo / "scripts" / "ci"
@@ -1171,7 +1192,10 @@ set -euo pipefail
 if [ "${1:-}" != "build" ]; then
   exit 9
 fi
-mkdir -p web
+printf '+ async 2.11.0\\n'
+"""
+        + xtrace_hook
+        + """mkdir -p web
 printf 'bin' > daymica-server
 printf 'page' > web/index.html
 tar -czf "staging-${GITHUB_SHA}.tar.gz" daymica-server web
@@ -1223,6 +1247,9 @@ tar -czf "staging-${GITHUB_SHA}.tar.gz" daymica-server web
         sys.stdout, sys.stderr = out, err
         try:
             deploy()
+        except SystemExit:
+            if not xtrace_hook:
+                raise
         finally:
             sys.stdout, sys.stderr = old_out, old_err
     finally:
@@ -1233,6 +1260,21 @@ tar -czf "staging-${GITHUB_SHA}.tar.gz" daymica-server web
             else:
                 os.environ[name] = value
     text = out.getvalue() + err.getvalue()
+    if xtrace_hook:
+        if text.strip() != "FAIL xtrace":
+            fail("selftest-xtrace")
+        if key in text or ip in text or URL in text:
+            fail("selftest-leak")
+        if _records(record):
+            fail("selftest-xtrace")
+        if not detail.exists():
+            fail("selftest-xtrace")
+        body = detail.read_text(encoding="utf-8", errors="replace")
+        if key in body or ip in body:
+            fail("selftest-leak")
+        if "+__PB_XTRACE__" in body or "+ async 2.11.0" not in body:
+            fail("selftest-xtrace")
+        return
     if "PASS staging-build" not in text or "PASS deploy http=200" not in text:
         fail("selftest-deploy")
     if key in text or ip in text or URL in text:

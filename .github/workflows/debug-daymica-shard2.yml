@@ -1,0 +1,103 @@
+# 临时调试工作流：daymica flutter test 单分片明文日志。
+# 背景：flutter-test (daymica/2) 在 main HEAD 与 PR #531 head 上都失败，但
+# daymica-test.yml 的 gate 日志按设计加密清除，无法定位失败用例。本工作流
+# 跑同一命令，输出不过 quiet.sh 加密链路，日志直接留在 Actions UI，另存
+# 1 天 artifact。定位失败用例后删除本文件，并从 purge-gate-logs 清单复核。
+# 信任边界与 daymica-test.yml 相同：ref/sha 输入不可信，经 resolve-private-ref。
+name: Debug daymica shard
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Private repo ref (default main)'
+        required: false
+        default: main
+        type: string
+      sha:
+        description: 'Commit SHA (optional; wins over ref)'
+        required: false
+        type: string
+      shard:
+        description: 'Shard index 0-7'
+        required: false
+        default: '2'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: debug-daymica-shard
+  cancel-in-progress: false
+
+jobs:
+  shard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Validate shard input
+        run: |
+          set -euo pipefail
+          case "${{ github.event.inputs.shard }}" in
+            [0-7]) ;;
+            *) echo "FAIL shard" >&2; exit 1 ;;
+          esac
+
+      - name: Checkout public-builder
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Allowlist ref/sha
+        id: resolve
+        uses: ./.github/actions/resolve-private-ref
+        with:
+          ref: ${{ github.event.inputs.ref || 'main' }}
+          sha: ${{ github.event.inputs.sha }}
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          ref: ${{ steps.resolve.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Read Flutter version
+        id: flutter
+        run: |
+          set -euo pipefail
+          ver=$(tr -d '[:space:]' < .flutter-version)
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-version=$ver"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ steps.flutter.outputs.version }}
+          channel: stable
+          cache: true
+
+      - name: Pub get
+        working-directory: apps/daymica
+        run: flutter pub get
+
+      - name: Shard with plain log
+        working-directory: apps/daymica
+        env:
+          SHARD: ${{ github.event.inputs.shard || '2' }}
+        run: |
+          flutter test --concurrency=2 --total-shards=8 --shard-index="$SHARD" 2>&1 | tee "shard$SHARD.log"
+          exit ${PIPESTATUS[0]}
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daymica-shard-plain-log
+          path: apps/daymica/shard*.log
+          retention-days: 1
+          if-no-files-found: error

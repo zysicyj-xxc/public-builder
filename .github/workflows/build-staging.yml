@@ -428,7 +428,9 @@ jobs:
           SHA: ${{ needs.guard.outputs.sha }}
         run: |
           set -euo pipefail
-          API='https://test-api-daymica.zysicyj.top'
+          # 上传必须走 test-api（A 记录直连 .7）。test-api-daymica 是 CNAME 到阿里云 ESA，
+          # 几十 MB 的包会在约 12 秒被回源超时掐成 504（见 2026-10-26 run 40278013726）。
+          API='https://test-api.zysicyj.top'
           app="$APP_SLUG"
           case "$app" in
             daymica|password-vault|mail-box|water-tracker)
@@ -692,7 +694,8 @@ jobs:
           SHA: ${{ needs.guard.outputs.sha }}
         run: |
           set -euo pipefail
-          API='https://test-api-daymica.zysicyj.top'
+          # 上传必须走 test-api（A 记录直连 .7），理由同 Android publish 步骤。
+          API='https://test-api.zysicyj.top'
           app="$APP_SLUG"
           case "$app" in
             daymica|password-vault|mail-box|water-tracker|eye-care)

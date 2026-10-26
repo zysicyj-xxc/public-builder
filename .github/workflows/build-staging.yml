@@ -42,6 +42,9 @@ on:
         type: string
   repository_dispatch:
     types: [staging-build]
+  schedule:
+    # 定时兜底：手动补齐某个 App 的测试包（其余 App 的 version/add 会一直停在旧版本）。
+    - cron: '17 3 * * *'
 
 permissions:
   contents: read
@@ -139,6 +142,11 @@ jobs:
               publish=false
               if [ "${RAW_PUBLISH:-}" = "true" ]; then publish=true; fi
               echo "publish=$publish" >> "$GITHUB_OUTPUT"
+              ;;
+            schedule)
+              # 定时兜底：六个 App 全量重跑（CNB 派发是一条链路，这里只补历史遗留）。
+              echo "apps=,daymica,password-vault,yaoxiaobai,mail-box,water-tracker,eye-care," >> "$GITHUB_OUTPUT"
+              echo "publish=true" >> "$GITHUB_OUTPUT"
               ;;
             *)
               echo "event failed allowlist" >&2

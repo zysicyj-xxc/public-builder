@@ -466,10 +466,21 @@ jobs:
           # 入库必须留相对路径 /public/releases/...：后端 serveLocalReleaseFile 只认相对
           # 前缀才会 302 到 /releases-files/...；存成本机绝对地址会让 /releases 直接 404
           # （见 run 40281944349 之后 daymica 双平台下载全挂）。
+          # Windows runner 的 bash 会把以 / 开头的参数做 MSYS 路径转换（Git 安装前缀，
+          # 例如 /public/... → C:/Program Files/Git/public/...，2026-10-26 实测 windows-daymica
+          # 入库 id=15 就是这个地址）。所以先剥掉 Git 安装前缀。
+          case "$url" in
+            [A-Za-z]:[\/]*)
+              cyg_prefix=$(cygpath -u "$(cygpath -w "$url" 2>/dev/null || echo "$url")" 2>/dev/null || echo "$url")
+              case "$cyg_prefix" in
+                */public/releases/*) url="/public/releases/${cyg_prefix#*/public/releases/}" ;;
+              esac
+              ;;
+          esac
           case "$url" in
             /public/releases/$app/*) ;;
             "$API"/public/releases/$app/*) url="${url#"$API"}" ;;
-            *) echo 'upload url failed allowlist' >&2; exit 1 ;;
+            *) echo "upload url failed allowlist: $url" >&2; exit 1 ;;
           esac
           payload=$(python3 -c '
           import json, sys
@@ -735,10 +746,19 @@ jobs:
           [ "$code" = "200" ] || exit 1
           url=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["data"]["url"])' "$body")
           # 同 Android：入库留相对 /public/releases/...，否则 /releases 404。
+          # 同样先剥掉 Windows runner 上 MSYS 自动加的 Git 安装前缀。
+          case "$url" in
+            [A-Za-z]:[\/]*)
+              cyg_prefix=$(cygpath -u "$(cygpath -w "$url" 2>/dev/null || echo "$url")" 2>/dev/null || echo "$url")
+              case "$cyg_prefix" in
+                */public/releases/*) url="/public/releases/${cyg_prefix#*/public/releases/}" ;;
+              esac
+              ;;
+          esac
           case "$url" in
             /public/releases/$app/*) ;;
             "$API"/public/releases/$app/*) url="${url#"$API"}" ;;
-            *) echo 'upload url failed allowlist' >&2; exit 1 ;;
+            *) echo "upload url failed allowlist: $url" >&2; exit 1 ;;
           esac
           payload=$(python3 -c '
           import json, sys

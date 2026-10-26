@@ -728,8 +728,10 @@ jobs:
           [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'sha invalid' >&2; exit 1; }
           [ -f "$PKG" ] || { echo 'package missing' >&2; exit 1; }
           name="$app-staging-$VERSION-$CODE.exe"
-          md5=$(md5sum "$PKG" | cut -d' ' -f1)
-          sha256=$(sha256sum "$PKG" | cut -d' ' -f1)
+          # Windows runner 的 bash 里 md5sum/sha256sum 会把 "\<hex>" 原样打出来（反斜杠转义），
+          # 入库后 md5/sha256 变成 "\972d91d0..." 这种脏值（2026-10-26 实测），这里统一清洗。
+          md5=$(md5sum "$PKG" | cut -d' ' -f1 | tr -d '\\')
+          sha256=$(sha256sum "$PKG" | cut -d' ' -f1 | tr -d '\\')
           size=$(stat -c %s "$PKG")
           body="$RUNNER_TEMP/publish-body.json"
           hdr="$RUNNER_TEMP/publish-headers"

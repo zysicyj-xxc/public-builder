@@ -463,9 +463,12 @@ jobs:
           echo "upload-apk HTTP $code app=$app size=$size"
           [ "$code" = "200" ] || exit 1
           url=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["data"]["url"])' "$body")
+          # 入库必须留相对路径 /public/releases/...：后端 serveLocalReleaseFile 只认相对
+          # 前缀才会 302 到 /releases-files/...；存成本机绝对地址会让 /releases 直接 404
+          # （见 run 40281944349 之后 daymica 双平台下载全挂）。
           case "$url" in
-            /public/releases/$app/*) url="$API$url" ;;
-            "$API"/public/releases/$app/*) ;;
+            /public/releases/$app/*) ;;
+            "$API"/public/releases/$app/*) url="${url#"$API"}" ;;
             *) echo 'upload url failed allowlist' >&2; exit 1 ;;
           esac
           payload=$(python3 -c '
@@ -731,9 +734,10 @@ jobs:
           echo "upload-apk HTTP $code app=$app platform=windows size=$size"
           [ "$code" = "200" ] || exit 1
           url=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["data"]["url"])' "$body")
+          # 同 Android：入库留相对 /public/releases/...，否则 /releases 404。
           case "$url" in
-            /public/releases/$app/*) url="$API$url" ;;
-            "$API"/public/releases/$app/*) ;;
+            /public/releases/$app/*) ;;
+            "$API"/public/releases/$app/*) url="${url#"$API"}" ;;
             *) echo 'upload url failed allowlist' >&2; exit 1 ;;
           esac
           payload=$(python3 -c '

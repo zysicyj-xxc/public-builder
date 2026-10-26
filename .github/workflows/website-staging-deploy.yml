@@ -1,0 +1,123 @@
+# 官网测试环境：Next 静态导出 → EdgeOne Pages 测试项目。
+#
+# 为什么在公开仓：CNB 只做轻量触发（用户 2026-10-26 定，CNB 免费核心数有限）。
+# 构建与部署一律交给 GitHub 免费 runner；CNB 上的 auto-tag-staging 打完 T- tag 后
+# 由 .ci/cnb-dispatch-staging-webhook.sh 派发到这里。
+#
+# 触发：
+#   - repository_dispatch: types: [website-staging-deploy]
+#   - workflow_dispatch（手工补跑，供排查用）
+# 实际构建跑的是私有仓里的 .ci/cnb-website-staging-deploy.sh（唯一实现，不复制粘贴）。
+# 只部署测试项目（默认 zysicyj-website-staging，API 指向 test-api-daymica）；
+# 官网生产仍走 website-deploy.yml（.7 nginx），本文件不碰。
+name: Website Staging Deploy
+
+on:
+  repository_dispatch:
+    types: [website-staging-deploy]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "私有仓 ref（默认 main）"
+        required: false
+        default: "main"
+      sha:
+        description: "私有仓完整 40 位提交号（可选，给了就校验 HEAD 必须等于它）"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: website-staging-deploy
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      ref: ${{ steps.resolve.outputs.ref }}
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - name: resolve private ref
+        id: resolve
+        env:
+          INPUT_REF: ${{ github.event.inputs.ref }}
+          INPUT_SHA: ${{ github.event.inputs.sha }}
+          PAYLOAD_REF: ${{ github.event.client_payload.ref }}
+          PAYLOAD_SHA: ${{ github.event.client_payload.sha }}
+        run: |
+          set -eu
+          ref="${INPUT_REF:-${PAYLOAD_REF:-main}}"
+          sha="${INPUT_SHA:-${PAYLOAD_SHA:-}}"
+          case "$ref" in
+            *" "*|"")
+              echo "FAIL ref 非法（空或含空格）" >&2
+              exit 1
+              ;;
+          esac
+          if [ -n "$sha" ]; then
+            case "$sha" in
+              *[!0-9a-f]*)
+                echo "FAIL sha 必须是完整 40 位十六进制" >&2
+                exit 1
+                ;;
+            esac
+            if [ "${#sha}" -ne 40 ]; then
+              echo "FAIL sha 长度不是 40" >&2
+              exit 1
+            fi
+          fi
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "OK ref=${ref} sha=${sha:-<未指定>}"
+
+  deploy:
+    name: deploy
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: zysicyj-xxc/zysicyj
+          ref: ${{ needs.guard.outputs.ref }}
+          token: ${{ secrets.PRIVATE_REPO_ACCESS_TOKEN }}
+          fetch-depth: 1
+
+      - name: assert HEAD equals dispatched sha
+        env:
+          WANT_SHA: ${{ needs.guard.outputs.sha }}
+        run: |
+          set -eu
+          got="$(git rev-parse HEAD)"
+          echo "HEAD=${got}"
+          if [ -n "$WANT_SHA" ] && [ "$got" != "$WANT_SHA" ]; then
+            echo "FAIL HEAD(${got}) != 派发的 sha(${WANT_SHA})" >&2
+            exit 1
+          fi
+          echo "PASS head-sha"
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.14.0"
+
+      - name: deploy website staging (EdgeOne Pages)
+        env:
+          # 私有仓脚本自己 clone 密钥仓读 EDGEONE_API_TOKEN（与 CNB 上同一条代码路径）。
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          # 私有仓脚本按 CNB 口径取环境；这里补齐等价值（不是 CNB 构建，但等价信息）。
+          CNB_BRANCH: main
+          CNB_BUILD_WORKSPACE: ${{ github.workspace }}
+          WEBSITE_STAGING_PUBLIC_URL: https://test-website.zysicyj.top
+        run: |
+          set -eu
+          cd "$GITHUB_WORKSPACE"
+          export CNB_COMMIT="$(git rev-parse HEAD)"
+          export CNB_BUILD_ID="gh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          bash .ci/cnb-website-staging-deploy.sh deploy
